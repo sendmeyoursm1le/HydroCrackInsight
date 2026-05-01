@@ -24,6 +24,12 @@ class SensorSimulator:
     def stop(self) -> None:
         self.is_running = False
         self.current_state.mode = "остановлен"
+    
+    def reset_to_normal(self) -> None:
+        self.scenario = "normal"
+        self._ticks_in_scenario = 0
+        self.current_state.mode = "мониторинг"
+        self.current_state.status = "норма"
 
     def simulate_emergency(self) -> str:
         self.scenario = random.choice(

@@ -16,6 +16,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core.deviation_analyzer import DeviationAnalyzer, DeviationResult
+from app.core.emergency_service import EmergencyResponse, EmergencyService
+from app.models.equipment import Equipment, create_default_equipment
 from app.simulation.sensor_simulator import SensorSimulator
 
 
@@ -28,6 +30,10 @@ class MainWindow(QMainWindow):
 
         self.simulator = SensorSimulator()
         self.deviation_analyzer = DeviationAnalyzer()
+        self.emergency_service = EmergencyService()
+
+        self.equipment_list: list[Equipment] = create_default_equipment()
+
         self.last_status = "норма"
 
         self.timer = QTimer(self)
@@ -108,14 +114,17 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("Запустить мониторинг")
         self.stop_button = QPushButton("Остановить мониторинг")
         self.emergency_button = QPushButton("Сымитировать аварию")
+        self.reset_button = QPushButton("Сбросить аварию")
 
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
         self.emergency_button.clicked.connect(self.simulate_emergency)
+        self.reset_button.clicked.connect(self.reset_emergency_state)
 
         buttons_layout.addWidget(self.start_button)
         buttons_layout.addWidget(self.stop_button)
         buttons_layout.addWidget(self.emergency_button)
+        buttons_layout.addWidget(self.reset_button)
 
         layout.addWidget(title)
         layout.addLayout(grid)
@@ -139,26 +148,17 @@ class MainWindow(QMainWindow):
             ["Оборудование", "Тип", "Состояние", "Описание"]
         )
 
-        equipment_data = [
-            ("Реактор R-101", "Реактор", "Работает", "Основной реактор гидрокрекинга"),
-            ("Насос P-201", "Насос", "Работает", "Подача сырья"),
-            ("Компрессор C-301", "Компрессор", "Работает", "Подача водорода"),
-            ("Клапан V-401", "Клапан", "Работает", "Регулирование давления"),
-            ("Теплообменник H-501", "Теплообменник", "Работает", "Контроль температуры"),
-        ]
-
-        self.equipment_table.setRowCount(len(equipment_data))
-
-        for row, item in enumerate(equipment_data):
-            for col, value in enumerate(item):
-                self.equipment_table.setItem(row, col, QTableWidgetItem(value))
-
-        self.equipment_table.resizeColumnsToContents()
+        reset_equipment_button = QPushButton("Сбросить статусы оборудования")
+        reset_equipment_button.clicked.connect(self.reset_equipment_statuses)
 
         layout.addWidget(title)
         layout.addWidget(self.equipment_table)
+        layout.addWidget(reset_equipment_button)
 
         widget.setLayout(layout)
+
+        self.update_equipment_table()
+
         return widget
 
     def create_deviations_tab(self) -> QWidget:
@@ -237,8 +237,10 @@ class MainWindow(QMainWindow):
         return widget
 
     def start_monitoring(self) -> None:
+        self.simulator.reset_to_normal()
         self.simulator.start()
         self.timer.start()
+        self.last_status = "норма"
         self.add_log("INFO", "Мониторинг технологического процесса запущен")
 
     def stop_monitoring(self) -> None:
@@ -253,6 +255,19 @@ class MainWindow(QMainWindow):
 
         scenario_name = self.simulator.simulate_emergency()
         self.add_log("WARNING", f"Запущен сценарий отклонения: {scenario_name}")
+
+    def reset_emergency_state(self) -> None:
+        self.simulator.reset_to_normal()
+        self.emergency_service.reset_equipment(self.equipment_list)
+        self.update_equipment_table()
+        self.last_status = "норма"
+        self.add_log("INFO", "Аварийное состояние сброшено. Оборудование возвращено в рабочий режим.")
+        self.update_process_values()
+
+    def reset_equipment_statuses(self) -> None:
+        self.emergency_service.reset_equipment(self.equipment_list)
+        self.update_equipment_table()
+        self.add_log("INFO", "Статусы оборудования сброшены вручную")
 
     def update_process_values(self) -> None:
         state = self.simulator.generate_next_state()
@@ -299,8 +314,59 @@ class MainWindow(QMainWindow):
 
         if result.is_emergency:
             self.add_log("CRITICAL", result.message)
+
+            emergency_response = self.emergency_service.process_emergency(
+                deviation=result,
+                equipment_list=self.equipment_list,
+            )
+
+            self.handle_emergency_response(emergency_response)
         else:
             self.add_log("WARNING", result.message)
+
+    def handle_emergency_response(self, response: EmergencyResponse) -> None:
+        if not response.is_required:
+            return
+
+        self.add_log("CRITICAL", f"Аварийное реагирование: {response.emergency_type}")
+        self.add_log("ACTION", response.operator_message)
+
+        for action in response.actions:
+            self.add_log(
+                "ACTION",
+                (
+                    f"{action.equipment_name}: статус изменен на "
+                    f"'{action.new_status}'. Действие: {action.action_description}"
+                ),
+            )
+
+        self.update_equipment_table()
+
+    def update_equipment_table(self) -> None:
+        self.equipment_table.setRowCount(len(self.equipment_list))
+
+        for row, equipment in enumerate(self.equipment_list):
+            self.equipment_table.setItem(row, 0, QTableWidgetItem(equipment.name))
+            self.equipment_table.setItem(row, 1, QTableWidgetItem(equipment.equipment_type))
+            self.equipment_table.setItem(row, 2, QTableWidgetItem(equipment.status))
+            self.equipment_table.setItem(row, 3, QTableWidgetItem(equipment.description))
+
+            self.apply_equipment_status_style(row, equipment.status)
+
+        self.equipment_table.resizeColumnsToContents()
+
+    def apply_equipment_status_style(self, row: int, status: str) -> None:
+        status_item = self.equipment_table.item(row, 2)
+
+        if status_item is None:
+            return
+
+        if status in ("Работает",):
+            status_item.setBackground(Qt.GlobalColor.green)
+        elif status in ("Требуется проверка", "Сниженная нагрузка", "Контроль давления"):
+            status_item.setBackground(Qt.GlobalColor.yellow)
+        elif status in ("Авария", "Аварийное регулирование", "Безопасный режим"):
+            status_item.setBackground(Qt.GlobalColor.red)
 
     def add_deviation(
         self,
