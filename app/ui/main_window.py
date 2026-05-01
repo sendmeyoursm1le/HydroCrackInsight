@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from app.core.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.core.emergency_service import EmergencyResponse, EmergencyService
+from app.database.database_service import DatabaseService
 from app.models.equipment import Equipment, create_default_equipment
 from app.simulation.sensor_simulator import SensorSimulator
 
@@ -32,8 +33,10 @@ class MainWindow(QMainWindow):
         self.deviation_analyzer = DeviationAnalyzer()
         self.emergency_service = EmergencyService()
 
-        self.equipment_list: list[Equipment] = create_default_equipment()
+        self.database_service = DatabaseService()
+        self.database_service.initialize_database()
 
+        self.equipment_list: list[Equipment] = create_default_equipment()
         self.last_status = "норма"
 
         self.timer = QTimer(self)
@@ -52,6 +55,7 @@ class MainWindow(QMainWindow):
 
         self.add_log("INFO", "Система HydroCrack Insight запущена")
         self.add_log("INFO", "Главное окно успешно загружено")
+        self.add_log("INFO", "База данных инициализирована")
         self.update_process_values()
 
     def create_monitoring_tab(self) -> QWidget:
@@ -208,12 +212,16 @@ class MainWindow(QMainWindow):
         daily_report_button = QPushButton("Сформировать суточный отчет")
         resources_report_button = QPushButton("Сформировать отчет по ресурсам")
         emergency_report_button = QPushButton("Сформировать отчет по авариям")
+        database_stats_button = QPushButton("Показать статистику БД")
+
+        database_stats_button.clicked.connect(self.show_database_statistics)
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addWidget(daily_report_button)
         layout.addWidget(resources_report_button)
         layout.addWidget(emergency_report_button)
+        layout.addWidget(database_stats_button)
         layout.addStretch()
 
         widget.setLayout(layout)
@@ -261,12 +269,28 @@ class MainWindow(QMainWindow):
         self.emergency_service.reset_equipment(self.equipment_list)
         self.update_equipment_table()
         self.last_status = "норма"
-        self.add_log("INFO", "Аварийное состояние сброшено. Оборудование возвращено в рабочий режим.")
+
+        self.database_service.save_equipment_statuses(
+            timestamp=self.get_current_time(),
+            equipment_list=self.equipment_list,
+        )
+
+        self.add_log(
+            "INFO",
+            "Аварийное состояние сброшено. Оборудование возвращено в рабочий режим.",
+        )
+
         self.update_process_values()
 
     def reset_equipment_statuses(self) -> None:
         self.emergency_service.reset_equipment(self.equipment_list)
         self.update_equipment_table()
+
+        self.database_service.save_equipment_statuses(
+            timestamp=self.get_current_time(),
+            equipment_list=self.equipment_list,
+        )
+
         self.add_log("INFO", "Статусы оборудования сброшены вручную")
 
     def update_process_values(self) -> None:
@@ -293,6 +317,9 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Статус: {state.status}")
 
         self.apply_status_style(state.status)
+
+        current_time = self.get_current_time()
+        self.database_service.save_process_state(current_time, state)
 
         if state.status != self.last_status:
             self.handle_analysis_result(analysis_result)
@@ -342,14 +369,27 @@ class MainWindow(QMainWindow):
 
         self.update_equipment_table()
 
+        self.database_service.save_equipment_statuses(
+            timestamp=self.get_current_time(),
+            equipment_list=self.equipment_list,
+        )
+
     def update_equipment_table(self) -> None:
         self.equipment_table.setRowCount(len(self.equipment_list))
 
         for row, equipment in enumerate(self.equipment_list):
             self.equipment_table.setItem(row, 0, QTableWidgetItem(equipment.name))
-            self.equipment_table.setItem(row, 1, QTableWidgetItem(equipment.equipment_type))
+            self.equipment_table.setItem(
+                row,
+                1,
+                QTableWidgetItem(equipment.equipment_type),
+            )
             self.equipment_table.setItem(row, 2, QTableWidgetItem(equipment.status))
-            self.equipment_table.setItem(row, 3, QTableWidgetItem(equipment.description))
+            self.equipment_table.setItem(
+                row,
+                3,
+                QTableWidgetItem(equipment.description),
+            )
 
             self.apply_equipment_status_style(row, equipment.status)
 
@@ -361,11 +401,19 @@ class MainWindow(QMainWindow):
         if status_item is None:
             return
 
-        if status in ("Работает",):
+        if status == "Работает":
             status_item.setBackground(Qt.GlobalColor.green)
-        elif status in ("Требуется проверка", "Сниженная нагрузка", "Контроль давления"):
+        elif status in (
+            "Требуется проверка",
+            "Сниженная нагрузка",
+            "Контроль давления",
+        ):
             status_item.setBackground(Qt.GlobalColor.yellow)
-        elif status in ("Авария", "Аварийное регулирование", "Безопасный режим"):
+        elif status in (
+            "Авария",
+            "Аварийное регулирование",
+            "Безопасный режим",
+        ):
             status_item.setBackground(Qt.GlobalColor.red)
 
     def add_deviation(
@@ -376,7 +424,7 @@ class MainWindow(QMainWindow):
         message: str,
         recommendation: str,
     ) -> None:
-        current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        current_time = self.get_current_time()
 
         self.deviations_table.insertRow(0)
 
@@ -394,9 +442,42 @@ class MainWindow(QMainWindow):
 
         self.deviations_table.resizeColumnsToContents()
 
+        self.database_service.save_deviation(
+            timestamp=current_time,
+            parameter=parameter,
+            value=value,
+            level=level,
+            message=message,
+            recommendation=recommendation,
+        )
+
     def add_log(self, level: str, message: str) -> None:
-        current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        current_time = self.get_current_time()
         self.logs_text.append(f"[{current_time}] [{level}] {message}")
+
+        self.database_service.save_event(
+            timestamp=current_time,
+            level=level,
+            message=message,
+        )
+
+    def show_database_statistics(self) -> None:
+        counts = self.database_service.get_counts()
+
+        self.add_log(
+            "INFO",
+            (
+                "Статистика БД: "
+                f"параметров процесса — {counts['process_values']}, "
+                f"отклонений — {counts['deviations']}, "
+                f"событий — {counts['events']}, "
+                f"статусов оборудования — {counts['equipment_statuses']}"
+            ),
+        )
+
+    @staticmethod
+    def get_current_time() -> str:
+        return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
     def apply_status_style(self, status: str) -> None:
         base_style = """
