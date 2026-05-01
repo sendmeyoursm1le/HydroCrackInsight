@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+*.log
+
+hydrocrack.db
+*.sqlite
+*.sqlite3
+
+.vscode/
+
+reports/generated/
