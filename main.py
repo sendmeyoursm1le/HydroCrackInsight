@@ -1,17 +1,17 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 
-app = QApplication(sys.argv)
+from PyQt6.QtWidgets import QApplication
+from app.ui.main_window import MainWindow
 
-window = QWidget()
-window.setWindowTitle("HydroCrack Insight")
-window.resize(500, 300)
 
-layout = QVBoxLayout()
-label = QLabel("HydroCrack Insight запущен")
-layout.addWidget(label)
+def main() -> None:
+    app = QApplication(sys.argv)
 
-window.setLayout(layout)
-window.show()
+    window = MainWindow()
+    window.show()
 
-sys.exit(app.exec())
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
