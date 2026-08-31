@@ -2,86 +2,217 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from app.models.equipment import Equipment
+from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
+from app.users import get_role_definitions
 
 
 class DatabaseService:
     """
     Сервис работы с локальной базой данных SQLite.
 
-    Отвечает за:
-    - создание таблиц;
-    - сохранение параметров процесса;
-    - сохранение отклонений;
-    - сохранение журнала событий;
-    - сохранение статусов оборудования.
+    Схема хранит текущие MVP-данные и справочники, которые нужны для дальнейшего
+    развития системы по ТЗ ЛР5: роли, оборудование, датчики, режимы, ресурсы,
+    рекомендации, отчеты, сменный журнал и лабораторные результаты.
     """
+
+    SCHEMA_VERSION = "2"
+
+    COUNTED_TABLES = (
+        "roles",
+        "users",
+        "units",
+        "equipment_catalog",
+        "sensors",
+        "operating_modes",
+        "operating_mode_limits",
+        "process_values",
+        "sensor_data",
+        "deviations",
+        "events",
+        "equipment_statuses",
+        "plans",
+        "resource_usage",
+        "recommendations",
+        "reports",
+        "shift_journal_entries",
+        "lab_results",
+    )
+
+    SENSOR_DEFINITIONS = (
+        {
+            "code": "reactor_temperature",
+            "equipment_name": "Реактор R-101",
+            "parameter_name": "Температура реактора",
+            "measurement_unit": "°C",
+            "location": "Реакторный блок",
+            "normal_min": 360.0,
+            "normal_max": 430.0,
+        },
+        {
+            "code": "reactor_pressure",
+            "equipment_name": "Реактор R-101",
+            "parameter_name": "Давление реактора",
+            "measurement_unit": "атм",
+            "location": "Реакторный блок",
+            "normal_min": 120.0,
+            "normal_max": 180.0,
+        },
+        {
+            "code": "feed_flow",
+            "equipment_name": "Насос P-201",
+            "parameter_name": "Расход сырья",
+            "measurement_unit": "т/ч",
+            "location": "Линия подачи сырья",
+            "normal_min": 60.0,
+            "normal_max": 100.0,
+        },
+        {
+            "code": "hydrogen_flow",
+            "equipment_name": "Компрессор C-301",
+            "parameter_name": "Расход водорода",
+            "measurement_unit": "нм³/ч",
+            "location": "Линия водорода",
+            "normal_min": 2200.0,
+            "normal_max": 3800.0,
+        },
+        {
+            "code": "energy_consumption",
+            "equipment_name": "Теплообменник H-501",
+            "parameter_name": "Потребление энергии",
+            "measurement_unit": "кВт⋅ч",
+            "location": "Энергоблок",
+            "normal_min": 750.0,
+            "normal_max": 1200.0,
+        },
+        {
+            "code": "cooling_water_flow",
+            "equipment_name": "Теплообменник H-501",
+            "parameter_name": "Расход охлаждающей воды",
+            "measurement_unit": "м³/ч",
+            "location": "Система охлаждения",
+            "normal_min": 25.0,
+            "normal_max": 50.0,
+        },
+        {
+            "code": "catalyst_consumption",
+            "equipment_name": "Реактор R-101",
+            "parameter_name": "Расход катализатора",
+            "measurement_unit": "кг/ч",
+            "location": "Катализаторный узел",
+            "normal_min": 0.8,
+            "normal_max": 2.5,
+        },
+        {
+            "code": "product_yield",
+            "equipment_name": "Реактор R-101",
+            "parameter_name": "Выход продукции",
+            "measurement_unit": "%",
+            "location": "Выход установки",
+            "normal_min": 75.0,
+            "normal_max": 90.0,
+        },
+    )
+
+    PROCESS_SENSOR_FIELDS = (
+        ("reactor_temperature", "temperature"),
+        ("reactor_pressure", "pressure"),
+        ("feed_flow", "feed_flow"),
+        ("hydrogen_flow", "hydrogen_flow"),
+        ("energy_consumption", "energy"),
+        ("cooling_water_flow", "water_consumption"),
+        ("catalyst_consumption", "catalyst_consumption"),
+        ("product_yield", "product_yield"),
+    )
+
+    RESOURCE_FIELDS = (
+        ("hydrogen", "Водород", "hydrogen_flow", "нм³/ч"),
+        ("energy", "Электроэнергия", "energy", "кВт⋅ч"),
+        ("cooling_water", "Охлаждающая вода", "water_consumption", "м³/ч"),
+        ("catalyst", "Катализатор", "catalyst_consumption", "кг/ч"),
+    )
+
+    OPERATING_MODES = (
+        (
+            "mild_diesel",
+            "Мягкий режим",
+            "дизельная фракция",
+            "Стабильная переработка с повышенным ресурсом катализатора.",
+        ),
+        (
+            "balanced",
+            "Нормальный режим",
+            "вакуумный газойль",
+            "Баланс выхода светлых продуктов и энергопотребления.",
+        ),
+        (
+            "deep_hydrocracking",
+            "Жесткий режим",
+            "тяжелое сырье",
+            "Максимальная глубина превращения тяжелых фракций.",
+        ),
+        (
+            "max_kerosene",
+            "Максимум керосина",
+            "средние дистилляты",
+            "Смещение режима к увеличению выхода керосиновой фракции.",
+        ),
+        (
+            "energy_saving",
+            "Энергосберегающий режим",
+            "стабильное сырье",
+            "Снижение энергопотребления при допустимом выходе продукции.",
+        ),
+    )
+
+    OPERATING_MODE_LIMITS = {
+        "mild_diesel": {
+            "reactor_temperature": (365.0, 395.0, "°C"),
+            "reactor_pressure": (125.0, 155.0, "атм"),
+            "feed_flow": (65.0, 85.0, "т/ч"),
+            "hydrogen_flow": (2400.0, 3200.0, "нм³/ч"),
+        },
+        "balanced": {
+            "reactor_temperature": (380.0, 415.0, "°C"),
+            "reactor_pressure": (135.0, 170.0, "атм"),
+            "feed_flow": (70.0, 95.0, "т/ч"),
+            "hydrogen_flow": (2600.0, 3500.0, "нм³/ч"),
+        },
+        "deep_hydrocracking": {
+            "reactor_temperature": (405.0, 435.0, "°C"),
+            "reactor_pressure": (150.0, 185.0, "атм"),
+            "feed_flow": (60.0, 85.0, "т/ч"),
+            "hydrogen_flow": (3000.0, 3800.0, "нм³/ч"),
+        },
+        "max_kerosene": {
+            "reactor_temperature": (390.0, 425.0, "°C"),
+            "reactor_pressure": (140.0, 175.0, "атм"),
+            "feed_flow": (75.0, 100.0, "т/ч"),
+            "hydrogen_flow": (2700.0, 3600.0, "нм³/ч"),
+        },
+        "energy_saving": {
+            "reactor_temperature": (360.0, 390.0, "°C"),
+            "reactor_pressure": (120.0, 150.0, "атм"),
+            "feed_flow": (65.0, 90.0, "т/ч"),
+            "hydrogen_flow": (2300.0, 3100.0, "нм³/ч"),
+        },
+    }
 
     def __init__(self, database_path: str = "data/hydrocrack.db") -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._sensor_definitions_by_code = {
+            str(item["code"]): item for item in self.SENSOR_DEFINITIONS
+        }
 
     def initialize_database(self) -> None:
         with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS process_values (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    temperature REAL NOT NULL,
-                    pressure REAL NOT NULL,
-                    feed_flow REAL NOT NULL,
-                    hydrogen_flow REAL NOT NULL,
-                    energy REAL NOT NULL,
-                    water_consumption REAL NOT NULL,
-                    catalyst_consumption REAL NOT NULL,
-                    product_yield REAL NOT NULL,
-                    mode TEXT NOT NULL,
-                    status TEXT NOT NULL
-                )
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS deviations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    parameter TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    recommendation TEXT NOT NULL
-                )
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL
-                )
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS equipment_statuses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    equipment_name TEXT NOT NULL,
-                    equipment_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    description TEXT NOT NULL
-                )
-                """
-            )
+            self._create_metadata_schema(cursor)
+            self._create_reference_schema(cursor)
+            self._create_runtime_schema(cursor)
+            self._seed_reference_data(cursor)
 
             connection.commit()
 
@@ -121,7 +252,49 @@ class DatabaseService:
                 ),
             )
 
+            self._save_sensor_data_rows(cursor, timestamp, state)
+            self._save_resource_usage_rows(cursor, timestamp, state)
             connection.commit()
+
+    def get_last_process_state(self) -> ProcessState | None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    temperature,
+                    pressure,
+                    feed_flow,
+                    hydrogen_flow,
+                    energy,
+                    water_consumption,
+                    catalyst_consumption,
+                    product_yield,
+                    mode,
+                    status
+                FROM process_values
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            return ProcessState(
+                temperature=float(row[0]),
+                pressure=float(row[1]),
+                feed_flow=float(row[2]),
+                hydrogen_flow=float(row[3]),
+                energy=float(row[4]),
+                water_consumption=float(row[5]),
+                catalyst_consumption=float(row[6]),
+                product_yield=float(row[7]),
+                mode=str(row[8]),
+                status=str(row[9]),
+            )
 
     def save_deviation(
         self,
@@ -156,6 +329,29 @@ class DatabaseService:
                     recommendation,
                 ),
             )
+
+            if recommendation:
+                cursor.execute(
+                    """
+                    INSERT INTO recommendations (
+                        timestamp,
+                        recommendation_type,
+                        priority,
+                        message,
+                        status,
+                        source_parameter
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp,
+                        "deviation_response",
+                        level,
+                        recommendation,
+                        "new",
+                        parameter,
+                    ),
+                )
 
             connection.commit()
 
@@ -210,26 +406,548 @@ class DatabaseService:
                     ),
                 )
 
+                cursor.execute(
+                    """
+                    INSERT INTO equipment_catalog (
+                        unit_code,
+                        name,
+                        equipment_type,
+                        status,
+                        description
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        equipment_type = excluded.equipment_type,
+                        status = excluded.status,
+                        description = excluded.description
+                    """,
+                    (
+                        "hc_unit_1",
+                        equipment.name,
+                        equipment.equipment_type,
+                        equipment.status,
+                        equipment.description,
+                    ),
+                )
+
             connection.commit()
 
     def get_counts(self) -> dict[str, int]:
         with closing(self._connect()) as connection:
             cursor = connection.cursor()
-
-            tables = [
-                "process_values",
-                "deviations",
-                "events",
-                "equipment_statuses",
-            ]
-
             result: dict[str, int] = {}
 
-            for table in tables:
+            for table in self.COUNTED_TABLES:
                 cursor.execute(f"SELECT COUNT(*) FROM {table}")
                 result[table] = int(cursor.fetchone()[0])
 
             return result
 
+    def get_table_names(self) -> set[str]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            return {str(row[0]) for row in cursor.fetchall()}
+
+    def _create_metadata_schema(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS database_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO database_meta (key, value)
+            VALUES ('schema_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (self.SCHEMA_VERSION,),
+        )
+
+    def _create_reference_schema(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                code TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                responsibility TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                role_code TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(role_code) REFERENCES roles(code)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS units (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                location TEXT NOT NULL,
+                status TEXT NOT NULL,
+                design_capacity REAL NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unit_code TEXT NOT NULL,
+                name TEXT NOT NULL UNIQUE,
+                equipment_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                description TEXT NOT NULL,
+                FOREIGN KEY(unit_code) REFERENCES units(code)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensors (
+                code TEXT PRIMARY KEY,
+                unit_code TEXT NOT NULL,
+                equipment_name TEXT NOT NULL,
+                parameter_name TEXT NOT NULL,
+                measurement_unit TEXT NOT NULL,
+                location TEXT NOT NULL,
+                status TEXT NOT NULL,
+                normal_min REAL NOT NULL,
+                normal_max REAL NOT NULL,
+                FOREIGN KEY(unit_code) REFERENCES units(code),
+                FOREIGN KEY(equipment_name) REFERENCES equipment_catalog(name)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operating_modes (
+                code TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                feedstock_type TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operating_mode_limits (
+                mode_code TEXT NOT NULL,
+                parameter_code TEXT NOT NULL,
+                min_value REAL NOT NULL,
+                max_value REAL NOT NULL,
+                measurement_unit TEXT NOT NULL,
+                PRIMARY KEY(mode_code, parameter_code),
+                FOREIGN KEY(mode_code) REFERENCES operating_modes(code),
+                FOREIGN KEY(parameter_code) REFERENCES sensors(code)
+            )
+            """
+        )
+
+    def _create_runtime_schema(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS process_values (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                pressure REAL NOT NULL,
+                feed_flow REAL NOT NULL,
+                hydrogen_flow REAL NOT NULL,
+                energy REAL NOT NULL,
+                water_consumption REAL NOT NULL,
+                catalyst_consumption REAL NOT NULL,
+                product_yield REAL NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensor_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                sensor_code TEXT NOT NULL,
+                parameter_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                measurement_unit TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                FOREIGN KEY(sensor_code) REFERENCES sensors(code)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deviations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                parameter TEXT NOT NULL,
+                value TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                recommendation TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment_statuses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                equipment_name TEXT NOT NULL,
+                equipment_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                description TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                mode_code TEXT NOT NULL,
+                planned_feed_flow REAL NOT NULL,
+                planned_product_yield REAL NOT NULL,
+                planned_resource_limit REAL NOT NULL,
+                status TEXT NOT NULL,
+                created_by TEXT,
+                FOREIGN KEY(mode_code) REFERENCES operating_modes(code),
+                FOREIGN KEY(created_by) REFERENCES users(username)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resource_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                resource_code TEXT NOT NULL,
+                resource_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                measurement_unit TEXT NOT NULL,
+                mode TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                recommendation_type TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_parameter TEXT
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_type TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                title TEXT NOT NULL,
+                file_path TEXT,
+                created_at TEXT NOT NULL,
+                created_by TEXT,
+                status TEXT NOT NULL,
+                FOREIGN KEY(created_by) REFERENCES users(username)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shift_journal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                shift_code TEXT NOT NULL,
+                author_username TEXT,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                equipment_name TEXT,
+                action_required INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(author_username) REFERENCES users(username),
+                FOREIGN KEY(equipment_name) REFERENCES equipment_catalog(name)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lab_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                sample_code TEXT NOT NULL,
+                product_type TEXT NOT NULL,
+                density REAL,
+                sulfur_content REAL,
+                viscosity REAL,
+                product_yield REAL,
+                comment TEXT
+            )
+            """
+        )
+
+    def _seed_reference_data(self, cursor: sqlite3.Cursor) -> None:
+        for role in get_role_definitions():
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO roles (
+                    code,
+                    title,
+                    responsibility
+                )
+                VALUES (?, ?, ?)
+                """,
+                (role.code, role.title, role.responsibility),
+            )
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO users (
+                username,
+                display_name,
+                role_code,
+                password_hash,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "operator",
+                "Демо-оператор",
+                "operator",
+                "demo-password-placeholder",
+                1,
+            ),
+        )
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO units (
+                code,
+                name,
+                location,
+                status,
+                design_capacity
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "hc_unit_1",
+                "Установка гидрокрекинга",
+                "Нефтехимическое производство",
+                "работает",
+                250.0,
+            ),
+        )
+
+        for equipment in create_default_equipment():
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO equipment_catalog (
+                    unit_code,
+                    name,
+                    equipment_type,
+                    status,
+                    description
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "hc_unit_1",
+                    equipment.name,
+                    equipment.equipment_type,
+                    equipment.status,
+                    equipment.description,
+                ),
+            )
+
+        for sensor in self.SENSOR_DEFINITIONS:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO sensors (
+                    code,
+                    unit_code,
+                    equipment_name,
+                    parameter_name,
+                    measurement_unit,
+                    location,
+                    status,
+                    normal_min,
+                    normal_max
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sensor["code"],
+                    "hc_unit_1",
+                    sensor["equipment_name"],
+                    sensor["parameter_name"],
+                    sensor["measurement_unit"],
+                    sensor["location"],
+                    "active",
+                    sensor["normal_min"],
+                    sensor["normal_max"],
+                ),
+            )
+
+        for mode_code, title, feedstock_type, goal in self.OPERATING_MODES:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO operating_modes (
+                    code,
+                    title,
+                    feedstock_type,
+                    goal,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (mode_code, title, feedstock_type, goal, 1),
+            )
+
+        for mode_code, mode_limits in self.OPERATING_MODE_LIMITS.items():
+            for parameter_code, limit in mode_limits.items():
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO operating_mode_limits (
+                        mode_code,
+                        parameter_code,
+                        min_value,
+                        max_value,
+                        measurement_unit
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        mode_code,
+                        parameter_code,
+                        limit[0],
+                        limit[1],
+                        limit[2],
+                    ),
+                )
+
+    def _save_sensor_data_rows(
+        self,
+        cursor: sqlite3.Cursor,
+        timestamp: str,
+        state: ProcessState,
+    ) -> None:
+        for sensor_code, state_attribute in self.PROCESS_SENSOR_FIELDS:
+            sensor = self._sensor_definitions_by_code[sensor_code]
+            value = float(getattr(state, state_attribute))
+
+            cursor.execute(
+                """
+                INSERT INTO sensor_data (
+                    timestamp,
+                    sensor_code,
+                    parameter_name,
+                    value,
+                    measurement_unit,
+                    status,
+                    mode
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    sensor_code,
+                    sensor["parameter_name"],
+                    value,
+                    sensor["measurement_unit"],
+                    self._classify_sensor_status(sensor_code, value),
+                    state.mode,
+                ),
+            )
+
+    def _save_resource_usage_rows(
+        self,
+        cursor: sqlite3.Cursor,
+        timestamp: str,
+        state: ProcessState,
+    ) -> None:
+        for code, name, state_attribute, measurement_unit in self.RESOURCE_FIELDS:
+            cursor.execute(
+                """
+                INSERT INTO resource_usage (
+                    timestamp,
+                    resource_code,
+                    resource_name,
+                    value,
+                    measurement_unit,
+                    mode
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    code,
+                    name,
+                    float(getattr(state, state_attribute)),
+                    measurement_unit,
+                    state.mode,
+                ),
+            )
+
+    def _classify_sensor_status(self, sensor_code: str, value: float) -> str:
+        sensor = self._sensor_definitions_by_code[sensor_code]
+        minimum = float(sensor["normal_min"])
+        maximum = float(sensor["normal_max"])
+
+        if minimum <= value <= maximum:
+            return "норма"
+
+        return "отклонение"
+
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection

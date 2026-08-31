@@ -59,6 +59,32 @@ class SensorSimulatorTest(unittest.TestCase):
 
 
 class DatabaseServiceTest(unittest.TestCase):
+    def test_database_initializes_tz5_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            expected_tables = set(DatabaseService.COUNTED_TABLES) | {"database_meta"}
+
+            self.assertTrue(expected_tables.issubset(database.get_table_names()))
+
+    def test_database_seeds_reference_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            counts = database.get_counts()
+
+            self.assertEqual(counts["roles"], len(get_role_definitions()))
+            self.assertEqual(counts["users"], 1)
+            self.assertEqual(counts["units"], 1)
+            self.assertEqual(counts["equipment_catalog"], len(create_default_equipment()))
+            self.assertEqual(counts["sensors"], len(DatabaseService.SENSOR_DEFINITIONS))
+            self.assertEqual(counts["operating_modes"], len(DatabaseService.OPERATING_MODES))
+            self.assertEqual(counts["operating_mode_limits"], 20)
+
     def test_database_saves_baseline_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "hydrocrack.db"
@@ -76,6 +102,57 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(counts["process_values"], 1)
             self.assertEqual(counts["events"], 1)
             self.assertEqual(counts["equipment_statuses"], len(equipment))
+            self.assertEqual(counts["sensor_data"], len(DatabaseService.PROCESS_SENSOR_FIELDS))
+            self.assertEqual(counts["resource_usage"], len(DatabaseService.RESOURCE_FIELDS))
+
+    def test_database_restores_last_process_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            self.assertIsNone(database.get_last_process_state())
+
+            state = ProcessState(
+                temperature=401.5,
+                pressure=151.2,
+                feed_flow=79.4,
+                hydrogen_flow=3100.0,
+                energy=910.0,
+                water_consumption=36.5,
+                catalyst_consumption=1.65,
+                product_yield=83.4,
+                mode="мониторинг",
+                status="предупреждение",
+            )
+
+            database.save_process_state("01.01.2026 00:00:00", ProcessState())
+            database.save_process_state("01.01.2026 00:00:01", state)
+
+            restored_database = DatabaseService(str(database_path))
+            restored_database.initialize_database()
+
+            self.assertEqual(restored_database.get_last_process_state(), state)
+
+    def test_database_saves_deviation_as_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_deviation(
+                timestamp="01.01.2026 00:00:00",
+                parameter="Температура",
+                value="460.0 °C",
+                level="critical",
+                message="Перегрев реактора",
+                recommendation="Снизить тепловую нагрузку",
+            )
+
+            counts = database.get_counts()
+
+            self.assertEqual(counts["deviations"], 1)
+            self.assertEqual(counts["recommendations"], 1)
 
 
 class ProjectStructureTest(unittest.TestCase):

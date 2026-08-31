@@ -36,8 +36,12 @@ class MainWindow(QMainWindow):
         self.database_service = DatabaseService()
         self.database_service.initialize_database()
 
+        restored_state = self.database_service.get_last_process_state()
+        if restored_state is not None:
+            self.simulator.current_state = restored_state
+
         self.equipment_list: list[Equipment] = create_default_equipment()
-        self.last_status = "норма"
+        self.last_status = self.simulator.current_state.status
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -56,6 +60,8 @@ class MainWindow(QMainWindow):
         self.add_log("INFO", "Система HydroCrack Insight запущена")
         self.add_log("INFO", "Главное окно успешно загружено")
         self.add_log("INFO", "База данных инициализирована")
+        if restored_state is not None:
+            self.add_log("INFO", "Восстановлено последнее сохраненное состояние процесса")
         self.update_process_values()
 
     def create_monitoring_tab(self) -> QWidget:
@@ -468,8 +474,14 @@ class MainWindow(QMainWindow):
             "INFO",
             (
                 "Статистика БД: "
+                f"ролей — {counts['roles']}, "
+                f"датчиков — {counts['sensors']}, "
+                f"режимов — {counts['operating_modes']}, "
                 f"параметров процесса — {counts['process_values']}, "
+                f"показаний датчиков — {counts['sensor_data']}, "
+                f"ресурсов — {counts['resource_usage']}, "
                 f"отклонений — {counts['deviations']}, "
+                f"рекомендаций — {counts['recommendations']}, "
                 f"событий — {counts['events']}, "
                 f"статусов оборудования — {counts['equipment_statuses']}"
             ),
