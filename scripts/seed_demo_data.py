@@ -20,7 +20,7 @@ def main() -> None:
     report_service.generate_shift_report("admin")
 
     print(f"Демо-данные записаны в {Path(database.database_path).resolve()}")
-    print("Демо-отчеты созданы в reports/generated")
+    print("Демо-отчеты PDF созданы в reports/generated")
 
 
 if __name__ == "__main__":

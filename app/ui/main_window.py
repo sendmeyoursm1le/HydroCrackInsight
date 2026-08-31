@@ -715,7 +715,7 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout()
 
-        title = QLabel("Сменный журнал и передача смены")
+        title = QLabel("Сменный журнал и итог смены")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
 
@@ -763,7 +763,7 @@ class MainWindow(QMainWindow):
         journal_form.addWidget(QLabel("Сообщение"), 2, 0)
         journal_form.addWidget(self.journal_message_input, 2, 1, 1, 3)
 
-        handover_title = QLabel("Передача смены")
+        handover_title = QLabel("Итог смены")
         handover_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         handover_title.setStyleSheet("font-size: 18px; font-weight: bold;")
 
@@ -793,14 +793,14 @@ class MainWindow(QMainWindow):
             self.handover_checkboxes.append((item_code, item_title, checkbox))
             checklist_layout.addWidget(checkbox, row // 2, row % 2)
 
-        self.create_handover_button = QPushButton("Зафиксировать передачу")
+        self.create_handover_button = QPushButton("Зафиксировать итог смены")
         self.create_handover_button.clicked.connect(self.create_shift_handover)
         self.configure_button_permission(
             self.create_handover_button,
             CREATE_SHIFT_HANDOVER,
         )
 
-        handover_form.addWidget(QLabel("Кому"), 0, 0)
+        handover_form.addWidget(QLabel("Ознакомить"), 0, 0)
         handover_form.addWidget(self.handover_to_user_combo, 0, 1)
         handover_form.addWidget(QLabel("Итог смены"), 1, 0)
         handover_form.addWidget(self.handover_summary_input, 1, 1)
@@ -815,8 +815,8 @@ class MainWindow(QMainWindow):
             [
                 "Время",
                 "Смена",
-                "Сдал",
-                "Принял",
+                "Ответственный",
+                "Ознакомлен",
                 "Чек-лист",
                 "Итог",
                 "Открытые действия",
@@ -842,7 +842,7 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
 
         description = QLabel(
-            "Формирование PDF и CSV отчетов по сохраненным данным установки."
+            "Формирование PDF-отчетов по сохраненным данным установки."
         )
         description.setWordWrap(True)
 
@@ -1504,7 +1504,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Отчет создан",
-            f"PDF: {result.pdf_path}\nCSV: {result.csv_path}",
+            f"PDF: {result.pdf_path}",
         )
 
     def create_database_backup(self) -> None:
@@ -1578,13 +1578,13 @@ class MainWindow(QMainWindow):
     def create_shift_handover(self) -> None:
         if not self.require_permission(
             CREATE_SHIFT_HANDOVER,
-            "передача смены",
+            "фиксация итога смены",
         ):
             return
 
         to_user = str(self.handover_to_user_combo.currentData() or "")
         if not to_user:
-            QMessageBox.warning(self, "Передача смены", "Выберите принимающего.")
+            QMessageBox.warning(self, "Итог смены", "Выберите пользователя для ознакомления.")
             return
 
         summary = self.handover_summary_input.text().strip() or "Смена без замечаний"
@@ -1610,9 +1610,9 @@ class MainWindow(QMainWindow):
             checkbox.setChecked(False)
 
         self.populate_shift_handovers_from_database()
-        self.add_log("ACTION", f"Зафиксирована передача смены: {self.current_user.username} -> {to_user}")
+        self.add_log("ACTION", f"Зафиксирован итог смены: {self.current_user.username} -> {to_user}")
         self.audit_action(
-            action="shift_handover_created",
+            action="shift_summary_created",
             details=f"{self.current_user.username} -> {to_user}; {summary}",
         )
 

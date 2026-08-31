@@ -1,4 +1,3 @@
-import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,14 +10,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-from app.database.records import (
-    DeviationRecord,
-    EventRecord,
-    ProcessValueRecord,
-    ShiftHandoverRecord,
-    ShiftJournalRecord,
-)
-from app.resources import ResourceSummary
+from app.database.records import ProcessValueRecord
 
 
 @dataclass(frozen=True)
@@ -26,7 +18,6 @@ class ReportGenerationResult:
     report_type: str
     title: str
     pdf_path: Path
-    csv_path: Path
     created_at: str
 
 
@@ -78,7 +69,6 @@ class ReportService:
             report_type="daily",
             created_by=created_by,
             sections=(("Сводка", rows),),
-            csv_rows=rows,
             period_start=process_values[0].timestamp if process_values else "-",
             period_end=process_values[-1].timestamp if process_values else "-",
         )
@@ -116,7 +106,6 @@ class ReportService:
             report_type="resources",
             created_by=created_by,
             sections=(("Расход ресурсов", rows),),
-            csv_rows=rows,
             period_start="текущая смена",
             period_end=created_at,
         )
@@ -159,7 +148,6 @@ class ReportService:
                 ("Аварийные отклонения", deviation_rows),
                 ("События и действия", event_rows),
             ),
-            csv_rows=deviation_rows + [()] + event_rows,
             period_start=deviations[-1].timestamp if deviations else "-",
             period_end=deviations[0].timestamp if deviations else self._now(),
         )
@@ -186,7 +174,17 @@ class ReportService:
         if len(journal_rows) == 1:
             journal_rows.append(("-", "-", "-", "-", "-", "-", "Записей сменного журнала нет"))
 
-        handover_rows = [("Время", "Смена", "Сдал", "Принял", "Чек-лист", "Итог", "Открытые действия")]
+        handover_rows = [
+            (
+                "Время",
+                "Смена",
+                "Ответственный",
+                "Ознакомлен",
+                "Чек-лист",
+                "Итог",
+                "Открытые действия",
+            )
+        ]
         handover_rows.extend(
             (
                 item.timestamp,
@@ -200,16 +198,15 @@ class ReportService:
             for item in handovers
         )
         if len(handover_rows) == 1:
-            handover_rows.append(("-", "-", "-", "-", "-", "Передач смены нет", "-"))
+            handover_rows.append(("-", "-", "-", "-", "-", "Итогов смены нет", "-"))
 
         return self._write_report(
             report_type="shift",
             created_by=created_by,
             sections=(
                 ("Сменный журнал", journal_rows),
-                ("Передачи смены", handover_rows),
+                ("Итоги смен", handover_rows),
             ),
-            csv_rows=journal_rows + [()] + handover_rows,
             period_start=journal_entries[-1].timestamp if journal_entries else "-",
             period_end=journal_entries[0].timestamp if journal_entries else self._now(),
         )
@@ -219,7 +216,6 @@ class ReportService:
         report_type: str,
         created_by: str,
         sections: tuple[tuple[str, list[tuple[str, ...]]], ...],
-        csv_rows: list[tuple[str, ...]],
         period_start: str,
         period_end: str,
     ) -> ReportGenerationResult:
@@ -227,10 +223,8 @@ class ReportService:
         title = self.REPORT_TITLES[report_type]
         stem = f"{report_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         pdf_path = (self.output_dir / f"{stem}.pdf").resolve()
-        csv_path = (self.output_dir / f"{stem}.csv").resolve()
 
         self._write_pdf(pdf_path, title, created_at, created_by, sections)
-        self._write_csv(csv_path, csv_rows)
 
         self.database_service.save_report(
             report_type=report_type,
@@ -246,7 +240,6 @@ class ReportService:
             report_type=report_type,
             title=title,
             pdf_path=pdf_path,
-            csv_path=csv_path,
             created_at=created_at,
         )
 
@@ -284,11 +277,6 @@ class ReportService:
             elements.append(Spacer(1, 12))
 
         document.build(elements)
-
-    def _write_csv(self, csv_path: Path, rows: list[tuple[str, ...]]) -> None:
-        with csv_path.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file, delimiter=";")
-            writer.writerows(rows)
 
     def _build_table(self, rows: list[tuple[str, ...]]) -> Table:
         wrapped_rows = [

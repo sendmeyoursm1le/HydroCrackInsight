@@ -78,7 +78,7 @@ def get_domain_terms() -> tuple[DomainTerm, ...]:
         DomainTerm(
             code="shift_journal",
             title="Сменный журнал",
-            definition="Оперативные записи смены и чек-лист передачи смены.",
+            definition="Оперативные записи и итоговый чек-лист смены.",
         ),
         DomainTerm(
             code="resource_usage",

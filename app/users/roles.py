@@ -13,7 +13,7 @@ def get_role_definitions() -> tuple[RoleDefinition, ...]:
         RoleDefinition(
             code="operator",
             title="Оператор",
-            responsibility="Оперативный мониторинг, фиксация событий и передача смены.",
+            responsibility="Оперативный мониторинг, фиксация событий и итогов смены.",
         ),
         RoleDefinition(
             code="technologist",

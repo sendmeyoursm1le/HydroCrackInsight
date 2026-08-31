@@ -389,7 +389,7 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(records[0].status, "отклонение")
             self.assertEqual(records[0].mode, "Энергосберегающий режим")
 
-    def test_database_saves_shift_journal_and_handover(self) -> None:
+    def test_database_saves_shift_journal_and_shift_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "hydrocrack.db"
             database = DatabaseService(str(database_path))
@@ -646,7 +646,7 @@ class ProjectStructureTest(unittest.TestCase):
 
 
 class ReportServiceTest(unittest.TestCase):
-    def test_report_service_generates_pdf_csv_and_database_records(self) -> None:
+    def test_report_service_generates_pdf_and_database_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "hydrocrack.db"
             output_dir = Path(temp_dir) / "generated"
@@ -685,9 +685,7 @@ class ReportServiceTest(unittest.TestCase):
 
             for result in results:
                 self.assertTrue(result.pdf_path.exists())
-                self.assertTrue(result.csv_path.exists())
                 self.assertGreater(result.pdf_path.stat().st_size, 0)
-                self.assertGreater(result.csv_path.stat().st_size, 0)
 
             self.assertEqual(len(database.get_recent_reports()), 4)
 

@@ -76,7 +76,7 @@ def get_subsystems() -> tuple[SubsystemDefinition, ...]:
             package="app.journals",
             responsibility=(
                 "Журналирование событий, действий пользователей, отклонений и "
-                "передачи смены."
+                "итогов смены."
             ),
             status="частично реализовано",
         ),
