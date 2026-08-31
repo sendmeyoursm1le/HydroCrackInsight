@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.database.database_service import DatabaseService
+from app.demo import seed_demo_database
 from app.diagnostics import DiagnosticService
 from app.domain import PROJECT_NAME, get_domain_terms, get_subsystems
 from app.equipment.emergency_service import EmergencyService
@@ -715,6 +716,25 @@ class DiagnosticServiceTest(unittest.TestCase):
             self.assertIn("Последнее измерение", item_names)
             self.assertTrue(backup_result.path.exists())
             self.assertGreater(backup_result.size_bytes, 0)
+
+
+class DemoDataTest(unittest.TestCase):
+    def test_seed_demo_database_populates_operational_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = DatabaseService(str(Path(temp_dir) / "hydrocrack.db"))
+
+            seed_demo_database(database)
+
+            counts = database.get_counts()
+            last_state = database.get_last_process_state()
+
+            self.assertGreaterEqual(counts["process_values"], 4)
+            self.assertGreaterEqual(counts["events"], 2)
+            self.assertGreaterEqual(counts["deviations"], 1)
+            self.assertGreaterEqual(counts["shift_journal_entries"], 1)
+            self.assertGreaterEqual(counts["shift_handovers"], 1)
+            self.assertIsNotNone(last_state)
+            self.assertEqual(last_state.status, "норма")
 
 
 if __name__ == "__main__":
