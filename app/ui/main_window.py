@@ -1174,6 +1174,18 @@ class MainWindow(QMainWindow):
                 f"{self.active_operating_mode_profile.mode.title}"
             ),
         )
+        if (
+            self.simulator.current_state.status == "авария"
+            or self.simulator.current_state.mode == "аварийная остановка"
+        ):
+            self.add_log(
+                "WARNING",
+                (
+                    "Смена технологического режима не сбрасывает текущую аварию. "
+                    "Сначала выполните аварийные действия, стабилизируйте параметры "
+                    "и используйте кнопку 'Сбросить аварию'."
+                ),
+            )
         self.update_process_values(save_state=False)
 
     def update_parameters_table(

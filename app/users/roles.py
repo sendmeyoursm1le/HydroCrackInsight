@@ -25,7 +25,10 @@ def get_role_definitions() -> tuple[RoleDefinition, ...]:
         RoleDefinition(
             code="instrumentation_engineer",
             title="Инженер КИПиА/АСУ ТП",
-            responsibility="Диагностика каналов измерения и технических событий.",
+            responsibility=(
+                "Диагностика датчиков, клапанов, насосов, компрессоров, "
+                "каналов измерения и технических событий."
+            ),
         ),
         RoleDefinition(
             code="manager",
