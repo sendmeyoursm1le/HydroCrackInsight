@@ -2,12 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.core.deviation_analyzer import DeviationAnalyzer
-from app.core.emergency_service import EmergencyService
 from app.database.database_service import DatabaseService
+from app.domain import PROJECT_NAME, get_domain_terms, get_subsystems
+from app.equipment.emergency_service import EmergencyService
 from app.models.equipment import create_default_equipment
 from app.models.process_state import ProcessState
+from app.monitoring.deviation_analyzer import DeviationAnalyzer
 from app.simulation.sensor_simulator import SensorSimulator
+from app.users import get_role_definitions
 
 
 class DeviationAnalyzerTest(unittest.TestCase):
@@ -74,6 +76,27 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(counts["process_values"], 1)
             self.assertEqual(counts["events"], 1)
             self.assertEqual(counts["equipment_statuses"], len(equipment))
+
+
+class ProjectStructureTest(unittest.TestCase):
+    def test_domain_registry_contains_project_subsystems(self) -> None:
+        subsystems = {item.code: item for item in get_subsystems()}
+
+        self.assertEqual(PROJECT_NAME, "HydroCrack Insight")
+        self.assertIn("monitoring", subsystems)
+        self.assertIn("equipment", subsystems)
+        self.assertIn("reports", subsystems)
+        self.assertIn("users", subsystems)
+
+    def test_terms_and_roles_are_defined_for_tz5_scope(self) -> None:
+        term_codes = {item.code for item in get_domain_terms()}
+        role_codes = {item.code for item in get_role_definitions()}
+
+        self.assertIn("operating_mode", term_codes)
+        self.assertIn("shift_journal", term_codes)
+        self.assertIn("operator", role_codes)
+        self.assertIn("technologist", role_codes)
+        self.assertIn("instrumentation_engineer", role_codes)
 
 
 if __name__ == "__main__":

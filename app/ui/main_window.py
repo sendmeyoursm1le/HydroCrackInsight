@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.core.deviation_analyzer import DeviationAnalyzer, DeviationResult
-from app.core.emergency_service import EmergencyResponse, EmergencyService
+from app.equipment.emergency_service import EmergencyResponse, EmergencyService
+from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.database.database_service import DatabaseService
 from app.models.equipment import Equipment, create_default_equipment
 from app.simulation.sensor_simulator import SensorSimulator
