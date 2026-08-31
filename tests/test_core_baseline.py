@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -19,10 +20,14 @@ from app.monitoring.process_data_importer import ProcessDataImporter
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CHANGE_OPERATING_MODE,
+    CREATE_SHIFT_ENTRY,
+    CREATE_SHIFT_HANDOVER,
     DEMO_USERS,
     IMPORT_PROCESS_DATA,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
+    VIEW_RESOURCES,
+    VIEW_SHIFT_JOURNAL,
     get_accessible_tabs,
     get_role_definitions,
     has_permission,
@@ -331,6 +336,73 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(records[0].status, "отклонение")
             self.assertEqual(records[0].mode, "Энергосберегающий режим")
 
+    def test_database_saves_shift_journal_and_handover(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_shift_journal_entry(
+                timestamp="01.01.2026 08:00:00",
+                shift_code="Смена A",
+                author_username="operator",
+                level="ACTION",
+                message="Проверить насос после отклонения расхода",
+                equipment_name=None,
+                action_required=True,
+            )
+            handover_id = database.create_shift_handover(
+                timestamp="01.01.2026 20:00:00",
+                from_user="operator",
+                to_user="technologist",
+                shift_code="Смена A",
+                summary="Установка работает стабильно",
+                open_actions="Проконтролировать расход водорода",
+                checklist_items=(
+                    ("parameters_checked", "Параметры проверены", True, ""),
+                    ("resources_checked", "Ресурсы проверены", False, ""),
+                ),
+            )
+
+            counts = database.get_counts()
+            journal_records = database.get_recent_shift_journal_entries()
+            handover_records = database.get_recent_shift_handovers()
+
+            self.assertGreater(handover_id, 0)
+            self.assertEqual(counts["shift_journal_entries"], 1)
+            self.assertEqual(counts["shift_handovers"], 1)
+            self.assertEqual(counts["shift_handover_items"], 2)
+            self.assertTrue(journal_records[0].action_required)
+            self.assertEqual(handover_records[0].checked_items, 1)
+            self.assertEqual(handover_records[0].total_items, 2)
+
+    def test_database_builds_resource_usage_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_process_state(
+                "01.01.2026 00:00:00",
+                ProcessState(hydrogen_flow=3000.0),
+            )
+            database.save_process_state(
+                "01.01.2026 01:00:00",
+                ProcessState(hydrogen_flow=3600.0),
+            )
+
+            summaries = database.get_resource_usage_summary(
+                current_time=datetime(2026, 1, 1, 1, 30, 0),
+            )
+            summary_by_code = {
+                summary.resource_code: summary
+                for summary in summaries
+            }
+
+            self.assertAlmostEqual(summary_by_code["hydrogen"].shift_total, 3060.0)
+            self.assertEqual(summary_by_code["hydrogen"].shift_status, "норма")
+            self.assertEqual(summary_by_code["hydrogen"].measurement_unit, "нм³")
+
     def test_database_restores_latest_equipment_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "hydrocrack.db"
@@ -442,6 +514,13 @@ class DatabaseServiceTest(unittest.TestCase):
         self.assertFalse(has_permission("manager", IMPORT_PROCESS_DATA))
         self.assertTrue(has_permission("technologist", CHANGE_OPERATING_MODE))
         self.assertFalse(has_permission("operator", CHANGE_OPERATING_MODE))
+        self.assertTrue(has_permission("operator", CREATE_SHIFT_ENTRY))
+        self.assertTrue(has_permission("operator", CREATE_SHIFT_HANDOVER))
+        self.assertFalse(has_permission("manager", CREATE_SHIFT_HANDOVER))
+        self.assertTrue(has_permission("manager", VIEW_RESOURCES))
+        self.assertTrue(has_permission("manager", VIEW_SHIFT_JOURNAL))
+        self.assertIn("resources", get_accessible_tabs("manager"))
+        self.assertIn("shift_journal", get_accessible_tabs("operator"))
         self.assertIn("users", get_accessible_tabs("administrator"))
         self.assertNotIn("users", get_accessible_tabs("operator"))
 

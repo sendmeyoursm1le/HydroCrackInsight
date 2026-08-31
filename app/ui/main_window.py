@@ -5,11 +5,13 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QGridLayout,
     QComboBox,
     QHBoxLayout,
     QFileDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -35,6 +37,8 @@ from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CHANGE_OPERATING_MODE,
     CONTROL_MONITORING,
+    CREATE_SHIFT_ENTRY,
+    CREATE_SHIFT_HANDOVER,
     IMPORT_PROCESS_DATA,
     RESET_EMERGENCY,
     RESET_EQUIPMENT_STATUSES,
@@ -104,7 +108,9 @@ class MainWindow(QMainWindow):
         self.add_tab_if_allowed("monitoring", "Мониторинг", self.create_monitoring_tab)
         self.add_tab_if_allowed("equipment", "Оборудование", self.create_equipment_tab)
         self.add_tab_if_allowed("deviations", "Отклонения", self.create_deviations_tab)
+        self.add_tab_if_allowed("resources", "Ресурсы", self.create_resources_tab)
         self.add_tab_if_allowed("reports", "Отчеты", self.create_reports_tab)
+        self.add_tab_if_allowed("shift_journal", "Сменный журнал", self.create_shift_journal_tab)
         self.add_tab_if_allowed("logs", "Журнал", self.create_logs_tab)
         self.add_tab_if_allowed("users", "Пользователи", self.create_users_tab)
 
@@ -177,6 +183,9 @@ class MainWindow(QMainWindow):
         self.populate_logs_from_database()
         self.populate_audit_from_database()
         self.populate_trends_from_database()
+        self.populate_resources_from_database()
+        self.populate_shift_journal_from_database()
+        self.populate_shift_handovers_from_database()
 
     def request_user_switch(self) -> None:
         self.switch_user_requested.emit()
@@ -251,6 +260,79 @@ class MainWindow(QMainWindow):
                 self.trend_history[record.sensor_code].append(record.value)
 
         self.refresh_trend_chart()
+
+    def populate_resources_from_database(self) -> None:
+        if not hasattr(self, "resources_table"):
+            return
+
+        records = self.database_service.get_resource_usage_summary()
+        self.resources_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.resource_name,
+                f"{record.shift_total:.2f}",
+                f"{record.shift_limit:.2f}",
+                record.shift_status,
+                f"{record.daily_total:.2f}",
+                f"{record.daily_limit:.2f}",
+                record.daily_status,
+                record.measurement_unit,
+            ]
+
+            for col, cell_value in enumerate(values):
+                item = QTableWidgetItem(cell_value)
+                if col in (3, 6):
+                    self.apply_resource_status_style(item, cell_value)
+                self.resources_table.setItem(row, col, item)
+
+        self.resources_table.resizeColumnsToContents()
+
+    def populate_shift_journal_from_database(self) -> None:
+        if not hasattr(self, "shift_journal_table"):
+            return
+
+        records = self.database_service.get_recent_shift_journal_entries()
+        self.shift_journal_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.timestamp,
+                record.shift_code,
+                record.author_username,
+                record.level,
+                record.equipment_name,
+                "да" if record.action_required else "нет",
+                record.message,
+            ]
+
+            for col, cell_value in enumerate(values):
+                self.shift_journal_table.setItem(row, col, QTableWidgetItem(cell_value))
+
+        self.shift_journal_table.resizeColumnsToContents()
+
+    def populate_shift_handovers_from_database(self) -> None:
+        if not hasattr(self, "shift_handover_table"):
+            return
+
+        records = self.database_service.get_recent_shift_handovers()
+        self.shift_handover_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.timestamp,
+                record.shift_code,
+                record.from_user,
+                record.to_user,
+                f"{record.checked_items}/{record.total_items}",
+                record.summary,
+                record.open_actions,
+            ]
+
+            for col, cell_value in enumerate(values):
+                self.shift_handover_table.setItem(row, col, QTableWidgetItem(cell_value))
+
+        self.shift_handover_table.resizeColumnsToContents()
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -439,6 +521,161 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(self.deviations_table)
+
+        widget.setLayout(layout)
+        return widget
+
+    def create_resources_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        title = QLabel("Учет расхода ресурсов")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+
+        self.resources_table = QTableWidget()
+        self.resources_table.setColumnCount(8)
+        self.resources_table.setHorizontalHeaderLabels(
+            [
+                "Ресурс",
+                "За смену",
+                "Лимит смены",
+                "Статус смены",
+                "За сутки",
+                "Лимит суток",
+                "Статус суток",
+                "Ед.",
+            ]
+        )
+
+        refresh_button = QPushButton("Обновить ресурсы")
+        refresh_button.clicked.connect(self.populate_resources_from_database)
+
+        layout.addWidget(title)
+        layout.addWidget(self.resources_table)
+        layout.addWidget(refresh_button)
+
+        widget.setLayout(layout)
+        return widget
+
+    def create_shift_journal_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        title = QLabel("Сменный журнал и передача смены")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+
+        self.shift_journal_table = QTableWidget()
+        self.shift_journal_table.setColumnCount(7)
+        self.shift_journal_table.setHorizontalHeaderLabels(
+            [
+                "Время",
+                "Смена",
+                "Автор",
+                "Уровень",
+                "Оборудование",
+                "Требует действий",
+                "Сообщение",
+            ]
+        )
+
+        journal_form = QGridLayout()
+        self.shift_code_input = QLineEdit("Смена A")
+        self.journal_level_combo = QComboBox()
+        self.journal_level_combo.addItems(["INFO", "WARNING", "ACTION"])
+        self.journal_equipment_combo = QComboBox()
+        self.journal_equipment_combo.addItem("Без привязки", "")
+        for equipment in self.equipment_list:
+            self.journal_equipment_combo.addItem(equipment.name, equipment.name)
+
+        self.action_required_checkbox = QCheckBox("Требуется действие")
+        self.journal_message_input = QLineEdit()
+        self.journal_message_input.setPlaceholderText("Краткая запись по смене")
+        self.add_shift_entry_button = QPushButton("Добавить запись")
+        self.add_shift_entry_button.clicked.connect(self.add_shift_journal_entry)
+        self.configure_button_permission(
+            self.add_shift_entry_button,
+            CREATE_SHIFT_ENTRY,
+        )
+
+        journal_form.addWidget(QLabel("Смена"), 0, 0)
+        journal_form.addWidget(self.shift_code_input, 0, 1)
+        journal_form.addWidget(QLabel("Уровень"), 0, 2)
+        journal_form.addWidget(self.journal_level_combo, 0, 3)
+        journal_form.addWidget(QLabel("Оборудование"), 1, 0)
+        journal_form.addWidget(self.journal_equipment_combo, 1, 1)
+        journal_form.addWidget(self.action_required_checkbox, 1, 2)
+        journal_form.addWidget(self.add_shift_entry_button, 1, 3)
+        journal_form.addWidget(QLabel("Сообщение"), 2, 0)
+        journal_form.addWidget(self.journal_message_input, 2, 1, 1, 3)
+
+        handover_title = QLabel("Передача смены")
+        handover_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        handover_title.setStyleSheet("font-size: 18px; font-weight: bold;")
+
+        handover_form = QGridLayout()
+        self.handover_to_user_combo = QComboBox()
+        for account in self.database_service.get_active_user_accounts():
+            self.handover_to_user_combo.addItem(
+                f"{account.display_name} ({account.role_title})",
+                account.username,
+            )
+
+        self.handover_summary_input = QLineEdit()
+        self.handover_summary_input.setPlaceholderText("Состояние установки на конец смены")
+        self.handover_open_actions_input = QLineEdit()
+        self.handover_open_actions_input.setPlaceholderText("Открытые действия или риски")
+
+        checklist_layout = QGridLayout()
+        self.handover_checkboxes: list[tuple[str, str, QCheckBox]] = []
+        checklist_items = (
+            ("parameters_checked", "Параметры процесса проверены"),
+            ("deviations_reviewed", "Отклонения и рекомендации просмотрены"),
+            ("equipment_checked", "Статусы оборудования актуальны"),
+            ("resources_checked", "Расход ресурсов проверен"),
+        )
+        for row, (item_code, item_title) in enumerate(checklist_items):
+            checkbox = QCheckBox(item_title)
+            self.handover_checkboxes.append((item_code, item_title, checkbox))
+            checklist_layout.addWidget(checkbox, row // 2, row % 2)
+
+        self.create_handover_button = QPushButton("Зафиксировать передачу")
+        self.create_handover_button.clicked.connect(self.create_shift_handover)
+        self.configure_button_permission(
+            self.create_handover_button,
+            CREATE_SHIFT_HANDOVER,
+        )
+
+        handover_form.addWidget(QLabel("Кому"), 0, 0)
+        handover_form.addWidget(self.handover_to_user_combo, 0, 1)
+        handover_form.addWidget(QLabel("Итог смены"), 1, 0)
+        handover_form.addWidget(self.handover_summary_input, 1, 1)
+        handover_form.addWidget(QLabel("Открытые действия"), 2, 0)
+        handover_form.addWidget(self.handover_open_actions_input, 2, 1)
+        handover_form.addLayout(checklist_layout, 3, 0, 1, 2)
+        handover_form.addWidget(self.create_handover_button, 4, 1)
+
+        self.shift_handover_table = QTableWidget()
+        self.shift_handover_table.setColumnCount(7)
+        self.shift_handover_table.setHorizontalHeaderLabels(
+            [
+                "Время",
+                "Смена",
+                "Сдал",
+                "Принял",
+                "Чек-лист",
+                "Итог",
+                "Открытые действия",
+            ]
+        )
+
+        layout.addWidget(title)
+        layout.addLayout(journal_form)
+        layout.addWidget(self.shift_journal_table)
+        layout.addWidget(handover_title)
+        layout.addLayout(handover_form)
+        layout.addWidget(self.shift_handover_table)
 
         widget.setLayout(layout)
         return widget
@@ -661,6 +898,7 @@ class MainWindow(QMainWindow):
             self.update_process_values(save_state=False)
 
         self.populate_trends_from_database()
+        self.populate_resources_from_database()
         self.add_log(
             "INFO",
             f"Импортировано строк технологических данных: {import_result.imported_count}",
@@ -834,6 +1072,7 @@ class MainWindow(QMainWindow):
                 state,
                 operating_mode_profile=self.active_operating_mode_profile,
             )
+            self.populate_resources_from_database()
 
         if state.status != self.last_status:
             self.handle_analysis_result(analysis_result)
@@ -939,6 +1178,85 @@ class MainWindow(QMainWindow):
             item.setBackground(Qt.GlobalColor.green)
         else:
             item.setBackground(Qt.GlobalColor.yellow)
+
+    @staticmethod
+    def apply_resource_status_style(item: QTableWidgetItem, status: str) -> None:
+        if status == "норма":
+            item.setBackground(Qt.GlobalColor.green)
+        elif status == "перерасход":
+            item.setBackground(Qt.GlobalColor.yellow)
+        elif status == "критический перерасход":
+            item.setBackground(Qt.GlobalColor.red)
+
+    def add_shift_journal_entry(self) -> None:
+        if not self.require_permission(
+            CREATE_SHIFT_ENTRY,
+            "добавление записи в сменный журнал",
+        ):
+            return
+
+        message = self.journal_message_input.text().strip()
+        if not message:
+            QMessageBox.warning(self, "Сменный журнал", "Введите текст записи.")
+            return
+
+        equipment_name = str(self.journal_equipment_combo.currentData() or "")
+        self.database_service.save_shift_journal_entry(
+            timestamp=self.get_current_time(),
+            shift_code=self.shift_code_input.text().strip() or "Смена A",
+            author_username=self.current_user.username,
+            level=self.journal_level_combo.currentText(),
+            message=message,
+            equipment_name=equipment_name or None,
+            action_required=self.action_required_checkbox.isChecked(),
+        )
+
+        self.journal_message_input.clear()
+        self.action_required_checkbox.setChecked(False)
+        self.populate_shift_journal_from_database()
+        self.add_log("INFO", "Добавлена запись в сменный журнал")
+        self.audit_action("shift_journal_entry_created", message)
+
+    def create_shift_handover(self) -> None:
+        if not self.require_permission(
+            CREATE_SHIFT_HANDOVER,
+            "передача смены",
+        ):
+            return
+
+        to_user = str(self.handover_to_user_combo.currentData() or "")
+        if not to_user:
+            QMessageBox.warning(self, "Передача смены", "Выберите принимающего.")
+            return
+
+        summary = self.handover_summary_input.text().strip() or "Смена без замечаний"
+        open_actions = self.handover_open_actions_input.text().strip() or "Нет"
+        checklist_items = tuple(
+            (item_code, title, checkbox.isChecked(), "")
+            for item_code, title, checkbox in self.handover_checkboxes
+        )
+
+        self.database_service.create_shift_handover(
+            timestamp=self.get_current_time(),
+            from_user=self.current_user.username,
+            to_user=to_user,
+            shift_code=self.shift_code_input.text().strip() or "Смена A",
+            summary=summary,
+            open_actions=open_actions,
+            checklist_items=checklist_items,
+        )
+
+        self.handover_summary_input.clear()
+        self.handover_open_actions_input.clear()
+        for _item_code, _title, checkbox in self.handover_checkboxes:
+            checkbox.setChecked(False)
+
+        self.populate_shift_handovers_from_database()
+        self.add_log("ACTION", f"Зафиксирована передача смены: {self.current_user.username} -> {to_user}")
+        self.audit_action(
+            action="shift_handover_created",
+            details=f"{self.current_user.username} -> {to_user}; {summary}",
+        )
 
     def add_deviation(
         self,

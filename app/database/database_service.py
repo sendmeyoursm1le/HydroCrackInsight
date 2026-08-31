@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 from app.database.records import (
@@ -7,6 +8,8 @@ from app.database.records import (
     DeviationRecord,
     EventRecord,
     SensorDataRecord,
+    ShiftHandoverRecord,
+    ShiftJournalRecord,
 )
 from app.monitoring.parameter_snapshot import PARAMETER_DEFINITIONS
 from app.monitoring.operating_mode import (
@@ -16,6 +19,12 @@ from app.monitoring.operating_mode import (
 )
 from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
+from app.resources import (
+    ResourceSummary,
+    ResourceUsageSample,
+    build_resource_summary,
+    parse_resource_timestamp,
+)
 from app.users import DEMO_USERS, UserAccount, UserSession, get_role_definitions
 from app.users.security import hash_password
 
@@ -41,7 +50,7 @@ class DatabaseService:
     рекомендации, отчеты, сменный журнал и лабораторные результаты.
     """
 
-    SCHEMA_VERSION = "3"
+    SCHEMA_VERSION = "4"
 
     COUNTED_TABLES = (
         "roles",
@@ -62,6 +71,8 @@ class DatabaseService:
         "recommendations",
         "reports",
         "shift_journal_entries",
+        "shift_handovers",
+        "shift_handover_items",
         "lab_results",
     )
 
@@ -411,6 +422,231 @@ class DatabaseService:
                     mode=str(row[6]),
                 )
                 for row in cursor.fetchall()
+            )
+
+    def save_shift_journal_entry(
+        self,
+        timestamp: str,
+        shift_code: str,
+        author_username: str,
+        level: str,
+        message: str,
+        equipment_name: str | None = None,
+        action_required: bool = False,
+    ) -> None:
+        normalized_equipment_name = equipment_name or None
+
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO shift_journal_entries (
+                    timestamp,
+                    shift_code,
+                    author_username,
+                    level,
+                    message,
+                    equipment_name,
+                    action_required
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    shift_code,
+                    author_username,
+                    level,
+                    message,
+                    normalized_equipment_name,
+                    1 if action_required else 0,
+                ),
+            )
+            connection.commit()
+
+    def get_recent_shift_journal_entries(
+        self,
+        limit: int = 50,
+    ) -> tuple[ShiftJournalRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    shift_code,
+                    COALESCE(author_username, ''),
+                    level,
+                    message,
+                    COALESCE(equipment_name, ''),
+                    action_required
+                FROM shift_journal_entries
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                ShiftJournalRecord(
+                    timestamp=str(row[0]),
+                    shift_code=str(row[1]),
+                    author_username=str(row[2]),
+                    level=str(row[3]),
+                    message=str(row[4]),
+                    equipment_name=str(row[5]),
+                    action_required=bool(row[6]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def create_shift_handover(
+        self,
+        timestamp: str,
+        from_user: str,
+        to_user: str,
+        shift_code: str,
+        summary: str,
+        open_actions: str,
+        checklist_items: tuple[tuple[str, str, bool, str], ...],
+    ) -> int:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO shift_handovers (
+                    timestamp,
+                    from_user,
+                    to_user,
+                    shift_code,
+                    status,
+                    summary,
+                    open_actions
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    from_user,
+                    to_user,
+                    shift_code,
+                    "created",
+                    summary,
+                    open_actions,
+                ),
+            )
+            handover_id = int(cursor.lastrowid)
+
+            for item_code, title, is_checked, comment in checklist_items:
+                cursor.execute(
+                    """
+                    INSERT INTO shift_handover_items (
+                        handover_id,
+                        item_code,
+                        title,
+                        is_checked,
+                        comment
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        handover_id,
+                        item_code,
+                        title,
+                        1 if is_checked else 0,
+                        comment,
+                    ),
+                )
+
+            connection.commit()
+            return handover_id
+
+    def get_recent_shift_handovers(
+        self,
+        limit: int = 20,
+    ) -> tuple[ShiftHandoverRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    shift_handovers.timestamp,
+                    shift_handovers.shift_code,
+                    shift_handovers.from_user,
+                    shift_handovers.to_user,
+                    shift_handovers.status,
+                    shift_handovers.summary,
+                    shift_handovers.open_actions,
+                    COALESCE(SUM(shift_handover_items.is_checked), 0) AS checked_items,
+                    COUNT(shift_handover_items.id) AS total_items
+                FROM shift_handovers
+                LEFT JOIN shift_handover_items
+                    ON shift_handover_items.handover_id = shift_handovers.id
+                GROUP BY shift_handovers.id
+                ORDER BY shift_handovers.id DESC
+                LIMIT ?
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                ShiftHandoverRecord(
+                    timestamp=str(row[0]),
+                    shift_code=str(row[1]),
+                    from_user=str(row[2]),
+                    to_user=str(row[3]),
+                    status=str(row[4]),
+                    summary=str(row[5]),
+                    open_actions=str(row[6]),
+                    checked_items=int(row[7]),
+                    total_items=int(row[8]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def get_resource_usage_summary(
+        self,
+        current_time: datetime | None = None,
+        shift_hours: int = 12,
+    ) -> tuple[ResourceSummary, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    resource_code,
+                    resource_name,
+                    value,
+                    measurement_unit,
+                    mode
+                FROM resource_usage
+                ORDER BY id
+                """
+            )
+
+            samples: list[ResourceUsageSample] = []
+            for row in cursor.fetchall():
+                timestamp = parse_resource_timestamp(str(row[0]))
+                if timestamp is None:
+                    continue
+
+                samples.append(
+                    ResourceUsageSample(
+                        timestamp=timestamp,
+                        resource_code=str(row[1]),
+                        resource_name=str(row[2]),
+                        value=float(row[3]),
+                        measurement_unit=str(row[4]),
+                        mode=str(row[5]),
+                    )
+                )
+
+            return build_resource_summary(
+                tuple(samples),
+                current_time=current_time,
+                shift_hours=shift_hours,
             )
 
     def get_operating_modes(self) -> tuple[OperatingMode, ...]:
@@ -1178,6 +1414,38 @@ class DatabaseService:
                 action_required INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(author_username) REFERENCES users(username),
                 FOREIGN KEY(equipment_name) REFERENCES equipment_catalog(name)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shift_handovers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                from_user TEXT NOT NULL,
+                to_user TEXT NOT NULL,
+                shift_code TEXT NOT NULL,
+                status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                open_actions TEXT NOT NULL,
+                FOREIGN KEY(from_user) REFERENCES users(username),
+                FOREIGN KEY(to_user) REFERENCES users(username)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shift_handover_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                handover_id INTEGER NOT NULL,
+                item_code TEXT NOT NULL,
+                title TEXT NOT NULL,
+                is_checked INTEGER NOT NULL DEFAULT 0,
+                comment TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(handover_id) REFERENCES shift_handovers(id)
+                    ON DELETE CASCADE
             )
             """
         )

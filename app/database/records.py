@@ -37,3 +37,27 @@ class SensorDataRecord:
     measurement_unit: str
     status: str
     mode: str
+
+
+@dataclass(frozen=True)
+class ShiftJournalRecord:
+    timestamp: str
+    shift_code: str
+    author_username: str
+    level: str
+    message: str
+    equipment_name: str
+    action_required: bool
+
+
+@dataclass(frozen=True)
+class ShiftHandoverRecord:
+    timestamp: str
+    shift_code: str
+    from_user: str
+    to_user: str
+    status: str
+    summary: str
+    open_actions: str
+    checked_items: int
+    total_items: int
