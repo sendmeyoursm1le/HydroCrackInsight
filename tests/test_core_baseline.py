@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.database.database_service import DatabaseService
+from app.diagnostics import DiagnosticService
 from app.domain import PROJECT_NAME, get_domain_terms, get_subsystems
 from app.equipment.emergency_service import EmergencyService
 from app.forecasting import ForecastScenario, ProcessForecastService
@@ -21,6 +22,7 @@ from app.monitoring.process_data_importer import ProcessDataImporter
 from app.reports import ReportService
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
+    BACKUP_DATABASE,
     CHANGE_OPERATING_MODE,
     CREATE_SHIFT_ENTRY,
     CREATE_SHIFT_HANDOVER,
@@ -28,6 +30,7 @@ from app.users import (
     IMPORT_PROCESS_DATA,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
+    VIEW_DIAGNOSTICS,
     VIEW_FORECASTING,
     VIEW_RESOURCES,
     VIEW_SHIFT_JOURNAL,
@@ -576,6 +579,20 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(reports[0].report_type, "daily")
             self.assertEqual(reports[0].created_by, "operator")
 
+    def test_database_backup_creates_readable_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            backup_path = Path(temp_dir) / "backup.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            database.save_process_state("01.01.2026 00:00:00", ProcessState())
+
+            result_path = database.backup_database(backup_path)
+            backup_database = DatabaseService(str(result_path))
+
+            self.assertTrue(result_path.exists())
+            self.assertEqual(backup_database.get_counts()["process_values"], 1)
+
     def test_role_permissions_limit_actions_and_tabs(self) -> None:
         self.assertTrue(has_permission("operator", SIMULATE_EMERGENCY))
         self.assertFalse(has_permission("manager", SIMULATE_EMERGENCY))
@@ -593,8 +610,13 @@ class DatabaseServiceTest(unittest.TestCase):
         self.assertTrue(has_permission("technologist", VIEW_FORECASTING))
         self.assertTrue(has_permission("manager", VIEW_FORECASTING))
         self.assertFalse(has_permission("operator", VIEW_FORECASTING))
+        self.assertTrue(has_permission("instrumentation_engineer", VIEW_DIAGNOSTICS))
+        self.assertFalse(has_permission("operator", VIEW_DIAGNOSTICS))
+        self.assertTrue(has_permission("administrator", BACKUP_DATABASE))
+        self.assertFalse(has_permission("manager", BACKUP_DATABASE))
         self.assertIn("resources", get_accessible_tabs("manager"))
         self.assertIn("forecasting", get_accessible_tabs("technologist"))
+        self.assertIn("diagnostics", get_accessible_tabs("instrumentation_engineer"))
         self.assertIn("shift_journal", get_accessible_tabs("operator"))
         self.assertIn("users", get_accessible_tabs("administrator"))
         self.assertNotIn("users", get_accessible_tabs("operator"))
@@ -609,6 +631,7 @@ class ProjectStructureTest(unittest.TestCase):
         self.assertIn("equipment", subsystems)
         self.assertIn("reports", subsystems)
         self.assertIn("users", subsystems)
+        self.assertIn("diagnostics", subsystems)
 
     def test_terms_and_roles_are_defined_for_tz5_scope(self) -> None:
         term_codes = {item.code for item in get_domain_terms()}
@@ -666,6 +689,32 @@ class ReportServiceTest(unittest.TestCase):
                 self.assertGreater(result.csv_path.stat().st_size, 0)
 
             self.assertEqual(len(database.get_recent_reports()), 4)
+
+
+class DiagnosticServiceTest(unittest.TestCase):
+    def test_diagnostic_service_builds_snapshot_and_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            backup_dir = Path(temp_dir) / "backups"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            database.save_process_state("01.01.2026 00:00:00", ProcessState())
+
+            service = DiagnosticService(database)
+            snapshot = service.build_snapshot(
+                simulator_is_running=True,
+                simulator_mode="мониторинг",
+                simulator_status="норма",
+            )
+            backup_result = service.backup_database(backup_dir)
+
+            item_names = {item.name for item in snapshot.items}
+
+            self.assertIn(snapshot.overall_status, {"ok", "warning"})
+            self.assertIn("База данных", item_names)
+            self.assertIn("Последнее измерение", item_names)
+            self.assertTrue(backup_result.path.exists())
+            self.assertGreater(backup_result.size_bytes, 0)
 
 
 if __name__ == "__main__":

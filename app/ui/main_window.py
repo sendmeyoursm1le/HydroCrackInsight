@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from app.equipment.emergency_service import EmergencyResponse, EmergencyService
 from app.database.database_service import DatabaseService
+from app.diagnostics import DiagnosticService
 from app.forecasting import ProcessForecastService
 from app.models.equipment import Equipment
 from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
@@ -37,6 +38,7 @@ from app.monitoring.process_data_importer import ProcessDataImporter
 from app.reports import ReportService
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
+    BACKUP_DATABASE,
     CHANGE_OPERATING_MODE,
     CONTROL_MONITORING,
     CREATE_SHIFT_ENTRY,
@@ -46,6 +48,7 @@ from app.users import (
     RESET_EQUIPMENT_STATUSES,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
+    VIEW_DIAGNOSTICS,
     VIEW_REPORTS,
     UserSession,
     get_accessible_tabs,
@@ -81,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self.database_service = database_service or DatabaseService()
         self.database_service.initialize_database()
+        self.diagnostic_service = DiagnosticService(self.database_service)
         self.report_service = ReportService(self.database_service)
         self.current_user = current_user or self.database_service.get_default_user_session()
         self.accessible_tabs = get_accessible_tabs(self.current_user.role_code)
@@ -116,6 +120,7 @@ class MainWindow(QMainWindow):
         self.add_tab_if_allowed("resources", "Ресурсы", self.create_resources_tab)
         self.add_tab_if_allowed("forecasting", "Прогноз", self.create_forecasting_tab)
         self.add_tab_if_allowed("reports", "Отчеты", self.create_reports_tab)
+        self.add_tab_if_allowed("diagnostics", "Диагностика", self.create_diagnostics_tab)
         self.add_tab_if_allowed("shift_journal", "Сменный журнал", self.create_shift_journal_tab)
         self.add_tab_if_allowed("logs", "Журнал", self.create_logs_tab)
         self.add_tab_if_allowed("users", "Пользователи", self.create_users_tab)
@@ -192,6 +197,7 @@ class MainWindow(QMainWindow):
         self.populate_resources_from_database()
         self.populate_forecast_table()
         self.populate_reports_from_database()
+        self.populate_diagnostics_from_runtime()
         self.populate_shift_journal_from_database()
         self.populate_shift_handovers_from_database()
 
@@ -399,6 +405,42 @@ class MainWindow(QMainWindow):
                 self.reports_table.setItem(row, col, QTableWidgetItem(cell_value))
 
         self.reports_table.resizeColumnsToContents()
+
+    def populate_diagnostics_from_runtime(self) -> None:
+        if not hasattr(self, "diagnostics_table"):
+            return
+
+        try:
+            snapshot = self.diagnostic_service.build_snapshot(
+                simulator_is_running=self.simulator.is_running,
+                simulator_mode=self.simulator.current_state.mode,
+                simulator_status=self.simulator.current_state.status,
+            )
+        except Exception as exc:
+            self.diagnostics_status_label.setText(f"Диагностика недоступна: {exc}")
+            self.diagnostics_table.setRowCount(0)
+            return
+
+        status_title = {
+            "ok": "норма",
+            "warning": "требует внимания",
+            "critical": "критично",
+        }.get(snapshot.overall_status, snapshot.overall_status)
+        self.diagnostics_status_label.setText(
+            f"Состояние системы: {status_title} | обновлено: {snapshot.generated_at}"
+        )
+        self.apply_diagnostic_label_style(snapshot.overall_status)
+        self.diagnostics_table.setRowCount(len(snapshot.items))
+
+        for row, item in enumerate(snapshot.items):
+            values = [item.name, item.value, item.status]
+            for col, cell_value in enumerate(values):
+                table_item = QTableWidgetItem(cell_value)
+                if col == 2:
+                    self.apply_diagnostic_status_style(table_item, item.status)
+                self.diagnostics_table.setItem(row, col, table_item)
+
+        self.diagnostics_table.resizeColumnsToContents()
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -850,6 +892,52 @@ class MainWindow(QMainWindow):
         widget.setLayout(layout)
         return widget
 
+    def create_diagnostics_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        title = QLabel("Диагностика и надежность")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+
+        self.diagnostics_status_label = QLabel()
+        self.diagnostics_status_label.setStyleSheet(
+            """
+            font-size: 16px;
+            padding: 10px;
+            border: 1px solid #cccccc;
+            border-radius: 6px;
+            """
+        )
+
+        self.diagnostics_table = QTableWidget()
+        self.diagnostics_table.setColumnCount(3)
+        self.diagnostics_table.setHorizontalHeaderLabels(
+            ["Проверка", "Значение", "Статус"]
+        )
+
+        buttons_layout = QHBoxLayout()
+        refresh_button = QPushButton("Обновить диагностику")
+        self.backup_database_button = QPushButton("Создать резервную копию БД")
+
+        refresh_button.clicked.connect(self.populate_diagnostics_from_runtime)
+        self.backup_database_button.clicked.connect(self.create_database_backup)
+        self.configure_button_permission(
+            self.backup_database_button,
+            BACKUP_DATABASE,
+        )
+
+        buttons_layout.addWidget(refresh_button)
+        buttons_layout.addWidget(self.backup_database_button)
+
+        layout.addWidget(title)
+        layout.addWidget(self.diagnostics_status_label)
+        layout.addWidget(self.diagnostics_table)
+        layout.addLayout(buttons_layout)
+
+        widget.setLayout(layout)
+        return widget
+
     def create_logs_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout()
@@ -1208,6 +1296,7 @@ class MainWindow(QMainWindow):
                 operating_mode_profile=self.active_operating_mode_profile,
             )
             self.populate_resources_from_database()
+            self.populate_diagnostics_from_runtime()
 
         if state.status != self.last_status:
             self.handle_analysis_result(analysis_result)
@@ -1330,6 +1419,38 @@ class MainWindow(QMainWindow):
         elif delta < -1.0:
             item.setBackground(Qt.GlobalColor.yellow)
 
+    def apply_diagnostic_label_style(self, status: str) -> None:
+        base_style = """
+            font-size: 16px;
+            padding: 10px;
+            border: 1px solid #cccccc;
+            border-radius: 6px;
+            font-weight: bold;
+        """
+        if status == "ok":
+            self.diagnostics_status_label.setStyleSheet(
+                base_style + "background-color: #d9fdd3; color: #1f6b2a;"
+            )
+        elif status == "warning":
+            self.diagnostics_status_label.setStyleSheet(
+                base_style + "background-color: #fff3cd; color: #8a6d00;"
+            )
+        elif status == "critical":
+            self.diagnostics_status_label.setStyleSheet(
+                base_style + "background-color: #f8d7da; color: #842029;"
+            )
+        else:
+            self.diagnostics_status_label.setStyleSheet(base_style)
+
+    @staticmethod
+    def apply_diagnostic_status_style(item: QTableWidgetItem, status: str) -> None:
+        if status == "ok":
+            item.setBackground(Qt.GlobalColor.green)
+        elif status == "warning":
+            item.setBackground(Qt.GlobalColor.yellow)
+        elif status == "critical":
+            item.setBackground(Qt.GlobalColor.red)
+
     def calculate_forecast_scenarios(self) -> None:
         self.populate_forecast_table()
         self.add_log("INFO", "Выполнен расчет прогнозных сценариев")
@@ -1384,6 +1505,45 @@ class MainWindow(QMainWindow):
             self,
             "Отчет создан",
             f"PDF: {result.pdf_path}\nCSV: {result.csv_path}",
+        )
+
+    def create_database_backup(self) -> None:
+        if not self.require_permission(
+            BACKUP_DATABASE,
+            "создание резервной копии БД",
+        ):
+            return
+
+        backup_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Папка для резервной копии БД",
+            "backups",
+        )
+        if not backup_dir:
+            return
+
+        try:
+            result = self.diagnostic_service.backup_database(backup_dir)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка резервного копирования", str(exc))
+            self.add_log("WARNING", f"Ошибка резервного копирования БД: {exc}")
+            self.audit_action(
+                action="database_backup_failed",
+                details=str(exc),
+                level="WARNING",
+            )
+            return
+
+        self.populate_diagnostics_from_runtime()
+        self.add_log("INFO", f"Создана резервная копия БД: {result.path}")
+        self.audit_action(
+            action="database_backup_created",
+            details=str(result.path),
+        )
+        QMessageBox.information(
+            self,
+            "Резервная копия создана",
+            f"Файл: {result.path}\nРазмер: {result.size_bytes} байт",
         )
 
     def add_shift_journal_entry(self) -> None:

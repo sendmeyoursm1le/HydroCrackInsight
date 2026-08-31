@@ -40,7 +40,7 @@ def get_subsystems() -> tuple[SubsystemDefinition, ...]:
                 "Расчет и анализ расхода водорода, энергии, воды, катализатора "
                 "и реагентов."
             ),
-            status="каркас",
+            status="частично реализовано",
         ),
         SubsystemDefinition(
             code="forecasting",
@@ -50,7 +50,7 @@ def get_subsystems() -> tuple[SubsystemDefinition, ...]:
                 "Расчет прогнозных показателей и сравнение сценариев изменения "
                 "технологического режима."
             ),
-            status="каркас",
+            status="частично реализовано",
         ),
         SubsystemDefinition(
             code="reports",
@@ -59,7 +59,7 @@ def get_subsystems() -> tuple[SubsystemDefinition, ...]:
             responsibility=(
                 "Формирование сменных, суточных, аварийных и ресурсных отчетов."
             ),
-            status="каркас",
+            status="частично реализовано",
         ),
         SubsystemDefinition(
             code="users",
@@ -78,7 +78,17 @@ def get_subsystems() -> tuple[SubsystemDefinition, ...]:
                 "Журналирование событий, действий пользователей, отклонений и "
                 "передачи смены."
             ),
-            status="каркас",
+            status="частично реализовано",
+        ),
+        SubsystemDefinition(
+            code="diagnostics",
+            title="Диагностика и надежность",
+            package="app.diagnostics",
+            responsibility=(
+                "Проверка состояния БД, симулятора, последних данных и создание "
+                "резервных копий."
+            ),
+            status="частично реализовано",
         ),
         SubsystemDefinition(
             code="simulation",

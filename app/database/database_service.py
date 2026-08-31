@@ -1265,6 +1265,26 @@ class DatabaseService:
             cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             return {str(row[0]) for row in cursor.fetchall()}
 
+    def get_meta_value(self, key: str) -> str | None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT value FROM database_meta WHERE key = ?",
+                (key,),
+            )
+            row = cursor.fetchone()
+            return str(row[0]) if row is not None else None
+
+    def backup_database(self, destination_path: str | Path) -> Path:
+        destination = Path(destination_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        with closing(self._connect()) as source_connection:
+            with closing(sqlite3.connect(destination)) as backup_connection:
+                source_connection.backup(backup_connection)
+
+        return destination
+
     def _create_metadata_schema(self, cursor: sqlite3.Cursor) -> None:
         cursor.execute(
             """

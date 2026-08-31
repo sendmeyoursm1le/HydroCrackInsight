@@ -1,5 +1,6 @@
 from app.users.accounts import DEMO_USERS, DemoUserDefinition, UserAccount, UserSession
 from app.users.permissions import (
+    BACKUP_DATABASE,
     CONTROL_MONITORING,
     CHANGE_OPERATING_MODE,
     CREATE_SHIFT_ENTRY,
@@ -11,6 +12,7 @@ from app.users.permissions import (
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
     VIEW_DEVIATIONS,
+    VIEW_DIAGNOSTICS,
     VIEW_EQUIPMENT,
     VIEW_FORECASTING,
     VIEW_LOGS,
@@ -26,6 +28,7 @@ from app.users.roles import RoleDefinition, get_role_definitions
 from app.users.security import hash_password
 
 __all__ = [
+    "BACKUP_DATABASE",
     "CONTROL_MONITORING",
     "CHANGE_OPERATING_MODE",
     "CREATE_SHIFT_ENTRY",
@@ -38,6 +41,7 @@ __all__ = [
     "SIMULATE_EMERGENCY",
     "VIEW_DATABASE_STATISTICS",
     "VIEW_DEVIATIONS",
+    "VIEW_DIAGNOSTICS",
     "VIEW_EQUIPMENT",
     "VIEW_FORECASTING",
     "VIEW_LOGS",

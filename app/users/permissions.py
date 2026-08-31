@@ -5,6 +5,7 @@ VIEW_REPORTS = "view_reports"
 VIEW_LOGS = "view_logs"
 VIEW_RESOURCES = "view_resources"
 VIEW_FORECASTING = "view_forecasting"
+VIEW_DIAGNOSTICS = "view_diagnostics"
 VIEW_SHIFT_JOURNAL = "view_shift_journal"
 MANAGE_USERS = "manage_users"
 
@@ -17,6 +18,7 @@ IMPORT_PROCESS_DATA = "import_process_data"
 CHANGE_OPERATING_MODE = "change_operating_mode"
 CREATE_SHIFT_ENTRY = "create_shift_entry"
 CREATE_SHIFT_HANDOVER = "create_shift_handover"
+BACKUP_DATABASE = "backup_database"
 
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
@@ -46,6 +48,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_LOGS,
             VIEW_RESOURCES,
             VIEW_FORECASTING,
+            VIEW_DIAGNOSTICS,
             VIEW_SHIFT_JOURNAL,
             VIEW_DATABASE_STATISTICS,
             IMPORT_PROCESS_DATA,
@@ -58,6 +61,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_MONITORING,
             VIEW_EQUIPMENT,
             VIEW_LOGS,
+            VIEW_DIAGNOSTICS,
             VIEW_SHIFT_JOURNAL,
             RESET_EQUIPMENT_STATUSES,
             IMPORT_PROCESS_DATA,
@@ -72,6 +76,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_LOGS,
             VIEW_RESOURCES,
             VIEW_FORECASTING,
+            VIEW_DIAGNOSTICS,
             VIEW_SHIFT_JOURNAL,
             VIEW_DATABASE_STATISTICS,
         }
@@ -85,6 +90,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_LOGS,
             VIEW_RESOURCES,
             VIEW_FORECASTING,
+            VIEW_DIAGNOSTICS,
             VIEW_SHIFT_JOURNAL,
             MANAGE_USERS,
             CONTROL_MONITORING,
@@ -96,6 +102,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             CHANGE_OPERATING_MODE,
             CREATE_SHIFT_ENTRY,
             CREATE_SHIFT_HANDOVER,
+            BACKUP_DATABASE,
         }
     ),
 }
@@ -107,6 +114,7 @@ TAB_PERMISSIONS: dict[str, str] = {
     "resources": VIEW_RESOURCES,
     "forecasting": VIEW_FORECASTING,
     "reports": VIEW_REPORTS,
+    "diagnostics": VIEW_DIAGNOSTICS,
     "shift_journal": VIEW_SHIFT_JOURNAL,
     "logs": VIEW_LOGS,
     "users": MANAGE_USERS,
