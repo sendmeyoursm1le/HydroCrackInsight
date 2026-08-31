@@ -8,6 +8,7 @@ import pandas as pd
 from app.database.database_service import DatabaseService
 from app.domain import PROJECT_NAME, get_domain_terms, get_subsystems
 from app.equipment.emergency_service import EmergencyService
+from app.forecasting import ForecastScenario, ProcessForecastService
 from app.models.equipment import create_default_equipment
 from app.models.process_state import ProcessState
 from app.monitoring.deviation_analyzer import DeviationAnalyzer
@@ -26,6 +27,7 @@ from app.users import (
     IMPORT_PROCESS_DATA,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
+    VIEW_FORECASTING,
     VIEW_RESOURCES,
     VIEW_SHIFT_JOURNAL,
     get_accessible_tabs,
@@ -123,6 +125,52 @@ class SensorSimulatorTest(unittest.TestCase):
         self.assertEqual(state.mode, "мониторинг")
         self.assertGreater(state.temperature, 0)
         self.assertGreater(state.product_yield, 0)
+
+    def test_emergency_shutdown_pauses_product_yield(self) -> None:
+        simulator = SensorSimulator()
+        simulator.start()
+        simulator.scenario = "pressure_spike"
+        simulator.current_state.pressure = 212.0
+
+        state = simulator.generate_next_state()
+
+        self.assertEqual(state.status, "авария")
+        self.assertEqual(state.mode, "аварийная остановка")
+        self.assertEqual(state.product_yield, 0.0)
+        self.assertLess(state.feed_flow, 80.0)
+
+
+class ProcessForecastServiceTest(unittest.TestCase):
+    def test_forecaster_calculates_normal_product_yield(self) -> None:
+        forecast_service = ProcessForecastService()
+
+        product_yield = forecast_service.calculate_product_yield(ProcessState())
+
+        self.assertAlmostEqual(product_yield, 84.0)
+
+    def test_forecaster_pauses_yield_for_emergency_state(self) -> None:
+        forecast_service = ProcessForecastService()
+        state = ProcessState(status="авария")
+
+        self.assertEqual(forecast_service.calculate_product_yield(state), 0.0)
+
+    def test_hydrogen_support_scenario_improves_low_hydrogen_forecast(self) -> None:
+        forecast_service = ProcessForecastService()
+        state = ProcessState(hydrogen_flow=1800.0)
+
+        result = forecast_service.evaluate_scenarios(
+            state,
+            scenarios=(
+                ForecastScenario(
+                    code="increase_hydrogen",
+                    title="Увеличить подачу водорода",
+                    hydrogen_flow_delta=300.0,
+                ),
+            ),
+        )[0]
+
+        self.assertGreater(result.forecast_yield, result.current_yield)
+        self.assertIn("Рекомендуется", result.recommendation)
 
 
 class MonitoringParameterTest(unittest.TestCase):
@@ -519,7 +567,11 @@ class DatabaseServiceTest(unittest.TestCase):
         self.assertFalse(has_permission("manager", CREATE_SHIFT_HANDOVER))
         self.assertTrue(has_permission("manager", VIEW_RESOURCES))
         self.assertTrue(has_permission("manager", VIEW_SHIFT_JOURNAL))
+        self.assertTrue(has_permission("technologist", VIEW_FORECASTING))
+        self.assertTrue(has_permission("manager", VIEW_FORECASTING))
+        self.assertFalse(has_permission("operator", VIEW_FORECASTING))
         self.assertIn("resources", get_accessible_tabs("manager"))
+        self.assertIn("forecasting", get_accessible_tabs("technologist"))
         self.assertIn("shift_journal", get_accessible_tabs("operator"))
         self.assertIn("users", get_accessible_tabs("administrator"))
         self.assertNotIn("users", get_accessible_tabs("operator"))

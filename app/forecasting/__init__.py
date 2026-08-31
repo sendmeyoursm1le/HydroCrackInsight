@@ -5,4 +5,17 @@ FORECAST_INPUT_CODES = (
     "hydrogen_flow",
 )
 
-__all__ = ["FORECAST_INPUT_CODES"]
+from app.forecasting.process_forecaster import (
+    FORECAST_SCENARIOS,
+    ForecastResult,
+    ForecastScenario,
+    ProcessForecastService,
+)
+
+__all__ = [
+    "FORECAST_INPUT_CODES",
+    "FORECAST_SCENARIOS",
+    "ForecastResult",
+    "ForecastScenario",
+    "ProcessForecastService",
+]

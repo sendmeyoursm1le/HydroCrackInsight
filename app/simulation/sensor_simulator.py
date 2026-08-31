@@ -1,5 +1,6 @@
 import random
 
+from app.forecasting import ProcessForecastService
 from app.models.process_state import ProcessState
 
 
@@ -16,6 +17,7 @@ class SensorSimulator:
         self.is_running = False
         self.scenario = "normal"
         self._ticks_in_scenario = 0
+        self.forecast_service = ProcessForecastService()
 
     def start(self) -> None:
         self.is_running = True
@@ -66,6 +68,9 @@ class SensorSimulator:
             self._generate_hydrogen_drop_state()
 
         self._calculate_product_yield()
+        if self.scenario != "normal" and self._is_emergency_shutdown_required():
+            self._apply_safe_shutdown()
+
         return self.current_state
 
     def _generate_normal_state(self) -> None:
@@ -235,22 +240,49 @@ class SensorSimulator:
         )
 
     def _calculate_product_yield(self) -> None:
-        temperature_penalty = abs(self.current_state.temperature - 390.0) * 0.05
-        pressure_penalty = abs(self.current_state.pressure - 150.0) * 0.03
-
-        hydrogen_penalty = 0.0
-        if self.current_state.hydrogen_flow < 2200:
-            hydrogen_penalty = (2200 - self.current_state.hydrogen_flow) * 0.004
-
-        calculated_yield = (
-            84.0
-            - temperature_penalty
-            - pressure_penalty
-            - hydrogen_penalty
-            + random.uniform(-1.0, 1.0)
+        self.current_state.product_yield = round(
+            self.forecast_service.calculate_product_yield(
+                self.current_state,
+                random_noise=random.uniform(-1.0, 1.0),
+            ),
+            2,
         )
 
-        self.current_state.product_yield = self._clamp(calculated_yield, 50.0, 95.0)
+    def _is_emergency_shutdown_required(self) -> bool:
+        return (
+            self.current_state.temperature >= 450.0
+            or self.current_state.pressure >= 210.0
+            or self.current_state.hydrogen_flow <= 1500.0
+        )
+
+    def _apply_safe_shutdown(self) -> None:
+        self.current_state.mode = "аварийная остановка"
+        self.current_state.status = "авария"
+        self.current_state.feed_flow = self._move_to_target(
+            self.current_state.feed_flow,
+            target=0.0,
+            speed=0.55,
+            noise=0.3,
+        )
+        self.current_state.catalyst_consumption = self._move_to_target(
+            self.current_state.catalyst_consumption,
+            target=0.0,
+            speed=0.45,
+            noise=0.02,
+        )
+        self.current_state.energy = self._move_to_target(
+            self.current_state.energy,
+            target=450.0,
+            speed=0.25,
+            noise=10.0,
+        )
+        self.current_state.water_consumption = self._move_to_target(
+            self.current_state.water_consumption,
+            target=55.0,
+            speed=0.25,
+            noise=1.0,
+        )
+        self.current_state.product_yield = 0.0
 
     @staticmethod
     def _move_to_target(

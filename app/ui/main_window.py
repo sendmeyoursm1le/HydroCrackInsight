@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from app.equipment.emergency_service import EmergencyResponse, EmergencyService
 from app.database.database_service import DatabaseService
+from app.forecasting import ProcessForecastService
 from app.models.equipment import Equipment
 from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.monitoring.parameter_snapshot import (
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self.deviation_analyzer = DeviationAnalyzer()
         self.emergency_service = EmergencyService()
         self.process_data_importer = ProcessDataImporter()
+        self.forecast_service = ProcessForecastService()
 
         self.database_service = database_service or DatabaseService()
         self.database_service.initialize_database()
@@ -109,6 +111,7 @@ class MainWindow(QMainWindow):
         self.add_tab_if_allowed("equipment", "Оборудование", self.create_equipment_tab)
         self.add_tab_if_allowed("deviations", "Отклонения", self.create_deviations_tab)
         self.add_tab_if_allowed("resources", "Ресурсы", self.create_resources_tab)
+        self.add_tab_if_allowed("forecasting", "Прогноз", self.create_forecasting_tab)
         self.add_tab_if_allowed("reports", "Отчеты", self.create_reports_tab)
         self.add_tab_if_allowed("shift_journal", "Сменный журнал", self.create_shift_journal_tab)
         self.add_tab_if_allowed("logs", "Журнал", self.create_logs_tab)
@@ -184,6 +187,7 @@ class MainWindow(QMainWindow):
         self.populate_audit_from_database()
         self.populate_trends_from_database()
         self.populate_resources_from_database()
+        self.populate_forecast_table()
         self.populate_shift_journal_from_database()
         self.populate_shift_handovers_from_database()
 
@@ -333,6 +337,40 @@ class MainWindow(QMainWindow):
                 self.shift_handover_table.setItem(row, col, QTableWidgetItem(cell_value))
 
         self.shift_handover_table.resizeColumnsToContents()
+
+    def populate_forecast_table(self) -> None:
+        if not hasattr(self, "forecast_table"):
+            return
+
+        state = self.simulator.current_state
+        current_yield = self.forecast_service.calculate_product_yield(state)
+        self.forecast_current_label.setText(
+            f"Текущий расчетный выход: {current_yield:.2f} %"
+        )
+
+        records = self.forecast_service.evaluate_scenarios(state)
+        self.forecast_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.scenario_title,
+                f"{record.current_yield:.2f} %",
+                f"{record.forecast_yield:.2f} %",
+                f"{record.yield_delta:+.2f} п.п.",
+                f"{record.forecast_temperature:.1f} °C",
+                f"{record.forecast_pressure:.1f} атм",
+                f"{record.forecast_feed_flow:.1f} т/ч",
+                f"{record.forecast_hydrogen_flow:.1f} нм³/ч",
+                record.recommendation,
+            ]
+
+            for col, cell_value in enumerate(values):
+                item = QTableWidgetItem(cell_value)
+                if col == 3:
+                    self.apply_forecast_delta_style(item, record.yield_delta)
+                self.forecast_table.setItem(row, col, item)
+
+        self.forecast_table.resizeColumnsToContents()
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -553,6 +591,51 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(self.resources_table)
+        layout.addWidget(refresh_button)
+
+        widget.setLayout(layout)
+        return widget
+
+    def create_forecasting_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        title = QLabel("Прогнозирование и оптимизация")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+
+        self.forecast_current_label = QLabel()
+        self.forecast_current_label.setStyleSheet(
+            """
+            font-size: 16px;
+            padding: 10px;
+            border: 1px solid #cccccc;
+            border-radius: 6px;
+            """
+        )
+
+        self.forecast_table = QTableWidget()
+        self.forecast_table.setColumnCount(9)
+        self.forecast_table.setHorizontalHeaderLabels(
+            [
+                "Сценарий",
+                "Сейчас",
+                "Прогноз",
+                "Изменение",
+                "Температура",
+                "Давление",
+                "Сырье",
+                "Водород",
+                "Рекомендация",
+            ]
+        )
+
+        refresh_button = QPushButton("Рассчитать сценарии")
+        refresh_button.clicked.connect(self.calculate_forecast_scenarios)
+
+        layout.addWidget(title)
+        layout.addWidget(self.forecast_current_label)
+        layout.addWidget(self.forecast_table)
         layout.addWidget(refresh_button)
 
         widget.setLayout(layout)
@@ -1060,6 +1143,7 @@ class MainWindow(QMainWindow):
             parameter_snapshots,
             self.active_operating_mode_profile.mode.title,
         )
+        self.populate_forecast_table()
         self.append_trend_points(parameter_snapshots)
         self.refresh_trend_chart()
 
@@ -1187,6 +1271,21 @@ class MainWindow(QMainWindow):
             item.setBackground(Qt.GlobalColor.yellow)
         elif status == "критический перерасход":
             item.setBackground(Qt.GlobalColor.red)
+
+    @staticmethod
+    def apply_forecast_delta_style(item: QTableWidgetItem, delta: float) -> None:
+        if delta > 1.0:
+            item.setBackground(Qt.GlobalColor.green)
+        elif delta < -1.0:
+            item.setBackground(Qt.GlobalColor.yellow)
+
+    def calculate_forecast_scenarios(self) -> None:
+        self.populate_forecast_table()
+        self.add_log("INFO", "Выполнен расчет прогнозных сценариев")
+        self.audit_action(
+            action="forecast_scenarios_calculated",
+            details="Расчет сценариев прогнозирования и оптимизации",
+        )
 
     def add_shift_journal_entry(self) -> None:
         if not self.require_permission(
