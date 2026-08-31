@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from app.models.equipment import Equipment
@@ -22,7 +23,7 @@ class DatabaseService:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
 
     def initialize_database(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             cursor.execute(
@@ -85,7 +86,7 @@ class DatabaseService:
             connection.commit()
 
     def save_process_state(self, timestamp: str, state: ProcessState) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             cursor.execute(
@@ -131,7 +132,7 @@ class DatabaseService:
         message: str,
         recommendation: str,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             cursor.execute(
@@ -159,7 +160,7 @@ class DatabaseService:
             connection.commit()
 
     def save_event(self, timestamp: str, level: str, message: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             cursor.execute(
@@ -185,7 +186,7 @@ class DatabaseService:
         timestamp: str,
         equipment_list: list[Equipment],
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             for equipment in equipment_list:
@@ -212,7 +213,7 @@ class DatabaseService:
             connection.commit()
 
     def get_counts(self) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             cursor = connection.cursor()
 
             tables = [
