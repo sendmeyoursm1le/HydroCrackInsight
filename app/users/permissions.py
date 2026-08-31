@@ -10,6 +10,7 @@ SIMULATE_EMERGENCY = "simulate_emergency"
 RESET_EMERGENCY = "reset_emergency"
 RESET_EQUIPMENT_STATUSES = "reset_equipment_statuses"
 VIEW_DATABASE_STATISTICS = "view_database_statistics"
+IMPORT_PROCESS_DATA = "import_process_data"
 
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
@@ -23,6 +24,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             SIMULATE_EMERGENCY,
             RESET_EMERGENCY,
             RESET_EQUIPMENT_STATUSES,
+            IMPORT_PROCESS_DATA,
         }
     ),
     "technologist": frozenset(
@@ -33,6 +35,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_REPORTS,
             VIEW_LOGS,
             VIEW_DATABASE_STATISTICS,
+            IMPORT_PROCESS_DATA,
         }
     ),
     "instrumentation_engineer": frozenset(
@@ -41,6 +44,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             VIEW_EQUIPMENT,
             VIEW_LOGS,
             RESET_EQUIPMENT_STATUSES,
+            IMPORT_PROCESS_DATA,
         }
     ),
     "manager": frozenset(
@@ -65,6 +69,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             RESET_EMERGENCY,
             RESET_EQUIPMENT_STATUSES,
             VIEW_DATABASE_STATISTICS,
+            IMPORT_PROCESS_DATA,
         }
     ),
 }

@@ -1,6 +1,7 @@
 from app.users.accounts import DEMO_USERS, DemoUserDefinition, UserAccount, UserSession
 from app.users.permissions import (
     CONTROL_MONITORING,
+    IMPORT_PROCESS_DATA,
     MANAGE_USERS,
     RESET_EMERGENCY,
     RESET_EQUIPMENT_STATUSES,
@@ -21,6 +22,7 @@ from app.users.security import hash_password
 __all__ = [
     "CONTROL_MONITORING",
     "DEMO_USERS",
+    "IMPORT_PROCESS_DATA",
     "MANAGE_USERS",
     "RESET_EMERGENCY",
     "RESET_EQUIPMENT_STATUSES",

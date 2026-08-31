@@ -2,15 +2,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 from app.database.database_service import DatabaseService
 from app.domain import PROJECT_NAME, get_domain_terms, get_subsystems
 from app.equipment.emergency_service import EmergencyService
 from app.models.equipment import create_default_equipment
 from app.models.process_state import ProcessState
 from app.monitoring.deviation_analyzer import DeviationAnalyzer
+from app.monitoring.parameter_snapshot import (
+    PARAMETER_DEFINITIONS,
+    build_parameter_snapshots,
+    classify_parameter_status,
+)
+from app.monitoring.process_data_importer import ProcessDataImporter
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     DEMO_USERS,
+    IMPORT_PROCESS_DATA,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
     get_accessible_tabs,
@@ -63,6 +72,58 @@ class SensorSimulatorTest(unittest.TestCase):
         self.assertEqual(state.mode, "мониторинг")
         self.assertGreater(state.temperature, 0)
         self.assertGreater(state.product_yield, 0)
+
+
+class MonitoringParameterTest(unittest.TestCase):
+    def test_parameter_snapshots_include_status_and_ranges(self) -> None:
+        snapshots = build_parameter_snapshots(ProcessState(temperature=460.0))
+        snapshot_by_code = {snapshot.code: snapshot for snapshot in snapshots}
+
+        self.assertEqual(len(snapshots), len(PARAMETER_DEFINITIONS))
+        self.assertEqual(snapshot_by_code["reactor_temperature"].status, "отклонение")
+        self.assertEqual(snapshot_by_code["reactor_pressure"].status, "норма")
+        self.assertEqual(classify_parameter_status(10.0, 20.0, 30.0), "отклонение")
+
+
+class ProcessDataImporterTest(unittest.TestCase):
+    def test_importer_reads_csv_with_process_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "process.csv"
+            csv_path.write_text(
+                (
+                    "timestamp,temperature,pressure,feed_flow,hydrogen_flow,"
+                    "energy,water_consumption,catalyst_consumption,product_yield\n"
+                    "01.01.2026 00:00:00,390,150,80,3000,900,35,1.5,82\n"
+                    "01.01.2026 00:00:01,395,151,81,3050,910,36,1.6,83\n"
+                ),
+                encoding="utf-8",
+            )
+
+            result = ProcessDataImporter().import_file(str(csv_path))
+
+            self.assertEqual(result.imported_count, 2)
+            self.assertEqual(result.last_state.temperature, 395.0)
+            self.assertEqual(result.timestamps[0], "01.01.2026 00:00:00")
+
+    def test_importer_reads_excel_with_process_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xlsx_path = Path(temp_dir) / "process.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "01.01.2026 00:00:00",
+                        "temperature": 390.0,
+                        "pressure": 150.0,
+                        "feed_flow": 80.0,
+                        "hydrogen_flow": 3000.0,
+                    }
+                ]
+            ).to_excel(xlsx_path, index=False)
+
+            result = ProcessDataImporter().import_file(str(xlsx_path))
+
+            self.assertEqual(result.imported_count, 1)
+            self.assertEqual(result.last_state.hydrogen_flow, 3000.0)
 
 
 class DatabaseServiceTest(unittest.TestCase):
@@ -135,6 +196,37 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(len(recent_events), 1)
             self.assertEqual(recent_events[0].message, "second")
             self.assertEqual(recent_deviations[0].parameter, "Температура")
+
+    def test_database_reads_recent_sensor_data_by_sensor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            for index in range(3):
+                database.save_process_state(
+                    f"01.01.2026 00:00:0{index}",
+                    ProcessState(temperature=390.0 + index),
+                )
+
+            records = database.get_recent_sensor_data(
+                sensor_codes=("reactor_temperature", "reactor_pressure"),
+                limit_per_sensor=2,
+            )
+
+            temperatures = [
+                record.value
+                for record in records
+                if record.sensor_code == "reactor_temperature"
+            ]
+            pressures = [
+                record.value
+                for record in records
+                if record.sensor_code == "reactor_pressure"
+            ]
+
+            self.assertEqual(temperatures, [391.0, 392.0])
+            self.assertEqual(pressures, [150.0, 150.0])
 
     def test_database_restores_latest_equipment_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,6 +335,8 @@ class DatabaseServiceTest(unittest.TestCase):
         self.assertFalse(has_permission("manager", SIMULATE_EMERGENCY))
         self.assertTrue(has_permission("manager", VIEW_DATABASE_STATISTICS))
         self.assertFalse(has_permission("operator", VIEW_DATABASE_STATISTICS))
+        self.assertTrue(has_permission("technologist", IMPORT_PROCESS_DATA))
+        self.assertFalse(has_permission("manager", IMPORT_PROCESS_DATA))
         self.assertIn("users", get_accessible_tabs("administrator"))
         self.assertNotIn("users", get_accessible_tabs("operator"))
 

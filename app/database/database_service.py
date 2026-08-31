@@ -2,11 +2,29 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from app.database.records import AuditRecord, DeviationRecord, EventRecord
+from app.database.records import (
+    AuditRecord,
+    DeviationRecord,
+    EventRecord,
+    SensorDataRecord,
+)
+from app.monitoring.parameter_snapshot import PARAMETER_DEFINITIONS
 from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
 from app.users import DEMO_USERS, UserAccount, UserSession, get_role_definitions
 from app.users.security import hash_password
+
+
+SENSOR_EQUIPMENT_BY_CODE = {
+    "reactor_temperature": ("Реактор R-101", "Реакторный блок"),
+    "reactor_pressure": ("Реактор R-101", "Реакторный блок"),
+    "feed_flow": ("Насос P-201", "Линия подачи сырья"),
+    "hydrogen_flow": ("Компрессор C-301", "Линия водорода"),
+    "energy_consumption": ("Теплообменник H-501", "Энергоблок"),
+    "cooling_water_flow": ("Теплообменник H-501", "Система охлаждения"),
+    "catalyst_consumption": ("Реактор R-101", "Катализаторный узел"),
+    "product_yield": ("Реактор R-101", "Выход установки"),
+}
 
 
 class DatabaseService:
@@ -42,79 +60,17 @@ class DatabaseService:
         "lab_results",
     )
 
-    SENSOR_DEFINITIONS = (
+    SENSOR_DEFINITIONS = tuple(
         {
-            "code": "reactor_temperature",
-            "equipment_name": "Реактор R-101",
-            "parameter_name": "Температура реактора",
-            "measurement_unit": "°C",
-            "location": "Реакторный блок",
-            "normal_min": 360.0,
-            "normal_max": 430.0,
-        },
-        {
-            "code": "reactor_pressure",
-            "equipment_name": "Реактор R-101",
-            "parameter_name": "Давление реактора",
-            "measurement_unit": "атм",
-            "location": "Реакторный блок",
-            "normal_min": 120.0,
-            "normal_max": 180.0,
-        },
-        {
-            "code": "feed_flow",
-            "equipment_name": "Насос P-201",
-            "parameter_name": "Расход сырья",
-            "measurement_unit": "т/ч",
-            "location": "Линия подачи сырья",
-            "normal_min": 60.0,
-            "normal_max": 100.0,
-        },
-        {
-            "code": "hydrogen_flow",
-            "equipment_name": "Компрессор C-301",
-            "parameter_name": "Расход водорода",
-            "measurement_unit": "нм³/ч",
-            "location": "Линия водорода",
-            "normal_min": 2200.0,
-            "normal_max": 3800.0,
-        },
-        {
-            "code": "energy_consumption",
-            "equipment_name": "Теплообменник H-501",
-            "parameter_name": "Потребление энергии",
-            "measurement_unit": "кВт⋅ч",
-            "location": "Энергоблок",
-            "normal_min": 750.0,
-            "normal_max": 1200.0,
-        },
-        {
-            "code": "cooling_water_flow",
-            "equipment_name": "Теплообменник H-501",
-            "parameter_name": "Расход охлаждающей воды",
-            "measurement_unit": "м³/ч",
-            "location": "Система охлаждения",
-            "normal_min": 25.0,
-            "normal_max": 50.0,
-        },
-        {
-            "code": "catalyst_consumption",
-            "equipment_name": "Реактор R-101",
-            "parameter_name": "Расход катализатора",
-            "measurement_unit": "кг/ч",
-            "location": "Катализаторный узел",
-            "normal_min": 0.8,
-            "normal_max": 2.5,
-        },
-        {
-            "code": "product_yield",
-            "equipment_name": "Реактор R-101",
-            "parameter_name": "Выход продукции",
-            "measurement_unit": "%",
-            "location": "Выход установки",
-            "normal_min": 75.0,
-            "normal_max": 90.0,
-        },
+            "code": definition.code,
+            "equipment_name": SENSOR_EQUIPMENT_BY_CODE[definition.code][0],
+            "parameter_name": definition.title,
+            "measurement_unit": definition.measurement_unit,
+            "location": SENSOR_EQUIPMENT_BY_CODE[definition.code][1],
+            "normal_min": definition.normal_min,
+            "normal_max": definition.normal_max,
+        }
+        for definition in PARAMETER_DEFINITIONS
     )
 
     PROCESS_SENSOR_FIELDS = (
@@ -389,6 +345,59 @@ class DatabaseService:
                     level=str(row[3]),
                     message=str(row[4]),
                     recommendation=str(row[5]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def get_recent_sensor_data(
+        self,
+        sensor_codes: tuple[str, ...],
+        limit_per_sensor: int = 60,
+    ) -> tuple[SensorDataRecord, ...]:
+        if not sensor_codes:
+            return ()
+
+        normalized_limit = self._normalize_limit(limit_per_sensor)
+        placeholders = ", ".join("?" for _ in sensor_codes)
+
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                f"""
+                SELECT
+                    timestamp,
+                    sensor_code,
+                    parameter_name,
+                    value,
+                    measurement_unit,
+                    status,
+                    mode
+                FROM (
+                    SELECT
+                        sensor_data.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY sensor_code
+                            ORDER BY id DESC
+                        ) AS row_number
+                    FROM sensor_data
+                    WHERE sensor_code IN ({placeholders})
+                )
+                WHERE row_number <= ?
+                ORDER BY id
+                """,
+                (*sensor_codes, normalized_limit),
+            )
+
+            return tuple(
+                SensorDataRecord(
+                    timestamp=str(row[0]),
+                    sensor_code=str(row[1]),
+                    parameter_name=str(row[2]),
+                    value=float(row[3]),
+                    measurement_unit=str(row[4]),
+                    status=str(row[5]),
+                    mode=str(row[6]),
                 )
                 for row in cursor.fetchall()
             )

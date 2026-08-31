@@ -1,12 +1,16 @@
 from collections.abc import Callable
 from datetime import datetime
 
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
+    QFileDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QTabWidget,
     QTableWidget,
@@ -17,12 +21,19 @@ from PyQt6.QtWidgets import (
 )
 
 from app.equipment.emergency_service import EmergencyResponse, EmergencyService
-from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.database.database_service import DatabaseService
 from app.models.equipment import Equipment
+from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
+from app.monitoring.parameter_snapshot import (
+    PARAMETER_DEFINITIONS,
+    ParameterSnapshot,
+    build_parameter_snapshots,
+)
+from app.monitoring.process_data_importer import ProcessDataImporter
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CONTROL_MONITORING,
+    IMPORT_PROCESS_DATA,
     RESET_EMERGENCY,
     RESET_EQUIPMENT_STATUSES,
     SIMULATE_EMERGENCY,
@@ -36,6 +47,14 @@ from app.users import (
 class MainWindow(QMainWindow):
     switch_user_requested = pyqtSignal()
 
+    TREND_SENSOR_CODES = (
+        "reactor_temperature",
+        "reactor_pressure",
+        "feed_flow",
+        "hydrogen_flow",
+    )
+    MAX_TREND_POINTS = 60
+
     def __init__(
         self,
         database_service: DatabaseService | None = None,
@@ -48,6 +67,7 @@ class MainWindow(QMainWindow):
         self.simulator = SensorSimulator()
         self.deviation_analyzer = DeviationAnalyzer()
         self.emergency_service = EmergencyService()
+        self.process_data_importer = ProcessDataImporter()
 
         self.database_service = database_service or DatabaseService()
         self.database_service.initialize_database()
@@ -62,6 +82,12 @@ class MainWindow(QMainWindow):
 
         self.equipment_list: list[Equipment] = self.database_service.get_equipment_catalog()
         self.last_status = self.simulator.current_state.status
+        self.parameter_definitions_by_code = {
+            definition.code: definition for definition in PARAMETER_DEFINITIONS
+        }
+        self.trend_history: dict[str, list[float]] = {
+            sensor_code: [] for sensor_code in self.TREND_SENSOR_CODES
+        }
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -144,6 +170,7 @@ class MainWindow(QMainWindow):
         self.populate_deviations_from_database()
         self.populate_logs_from_database()
         self.populate_audit_from_database()
+        self.populate_trends_from_database()
 
     def request_user_switch(self) -> None:
         self.switch_user_requested.emit()
@@ -203,6 +230,22 @@ class MainWindow(QMainWindow):
 
         self.audit_table.resizeColumnsToContents()
 
+    def populate_trends_from_database(self) -> None:
+        if not hasattr(self, "trend_canvas"):
+            return
+
+        for sensor_code in self.trend_history:
+            self.trend_history[sensor_code] = []
+
+        for record in self.database_service.get_recent_sensor_data(
+            sensor_codes=self.TREND_SENSOR_CODES,
+            limit_per_sensor=self.MAX_TREND_POINTS,
+        ):
+            if record.sensor_code in self.trend_history:
+                self.trend_history[record.sensor_code].append(record.value)
+
+        self.refresh_trend_chart()
+
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout()
@@ -258,32 +301,48 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.mode_label, 4, 0)
         grid.addWidget(self.status_label, 4, 1)
 
+        self.parameters_table = QTableWidget()
+        self.parameters_table.setColumnCount(6)
+        self.parameters_table.setHorizontalHeaderLabels(
+            ["Параметр", "Значение", "Ед.", "Норма", "Статус", "Режим"]
+        )
+        self.parameters_table.setRowCount(len(PARAMETER_DEFINITIONS))
+
+        self.trend_figure = Figure(figsize=(9, 4), tight_layout=True)
+        self.trend_canvas = FigureCanvas(self.trend_figure)
+        self.trend_axes = self.trend_figure.subplots(2, 2).flatten()
+
         buttons_layout = QHBoxLayout()
 
         self.start_button = QPushButton("Запустить мониторинг")
         self.stop_button = QPushButton("Остановить мониторинг")
         self.emergency_button = QPushButton("Сымитировать аварию")
         self.reset_button = QPushButton("Сбросить аварию")
+        self.import_button = QPushButton("Импорт CSV/Excel")
 
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
         self.emergency_button.clicked.connect(self.simulate_emergency)
         self.reset_button.clicked.connect(self.reset_emergency_state)
+        self.import_button.clicked.connect(self.import_process_data)
 
         self.configure_button_permission(self.start_button, CONTROL_MONITORING)
         self.configure_button_permission(self.stop_button, CONTROL_MONITORING)
         self.configure_button_permission(self.emergency_button, SIMULATE_EMERGENCY)
         self.configure_button_permission(self.reset_button, RESET_EMERGENCY)
+        self.configure_button_permission(self.import_button, IMPORT_PROCESS_DATA)
 
         buttons_layout.addWidget(self.start_button)
         buttons_layout.addWidget(self.stop_button)
         buttons_layout.addWidget(self.emergency_button)
         buttons_layout.addWidget(self.reset_button)
+        buttons_layout.addWidget(self.import_button)
 
         layout.addWidget(title)
         layout.addLayout(grid)
+        layout.addWidget(self.parameters_table)
+        layout.addWidget(self.trend_canvas)
         layout.addLayout(buttons_layout)
-        layout.addStretch()
 
         widget.setLayout(layout)
         return widget
@@ -526,7 +585,118 @@ class MainWindow(QMainWindow):
         self.add_log("INFO", "Статусы оборудования сброшены вручную")
         self.audit_action("equipment_statuses_reset", "Сброс статусов оборудования")
 
-    def update_process_values(self) -> None:
+    def import_process_data(self) -> None:
+        if not self.require_permission(IMPORT_PROCESS_DATA, "импорт данных процесса"):
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт данных процесса",
+            "",
+            "Табличные файлы (*.csv *.xlsx *.xls);;CSV (*.csv);;Excel (*.xlsx *.xls)",
+        )
+
+        if not file_path:
+            return
+
+        try:
+            import_result = self.process_data_importer.import_file(file_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка импорта", str(exc))
+            self.add_log("WARNING", f"Ошибка импорта данных: {exc}")
+            self.audit_action(
+                action="process_data_import_failed",
+                details=str(exc),
+                level="WARNING",
+            )
+            return
+
+        self.timer.stop()
+
+        for index, state in enumerate(import_result.states):
+            timestamp = import_result.timestamps[index] or self.get_current_time()
+            self.database_service.save_process_state(timestamp, state)
+
+        if import_result.last_state is not None:
+            self.simulator.current_state = import_result.last_state
+            self.update_process_values(save_state=False)
+
+        self.populate_trends_from_database()
+        self.add_log(
+            "INFO",
+            f"Импортировано строк технологических данных: {import_result.imported_count}",
+        )
+        self.audit_action(
+            action="process_data_imported",
+            details=f"Импортировано строк: {import_result.imported_count}",
+        )
+
+    def update_parameters_table(
+        self,
+        parameter_snapshots: tuple[ParameterSnapshot, ...],
+        mode: str,
+    ) -> None:
+        if not hasattr(self, "parameters_table"):
+            return
+
+        self.parameters_table.setRowCount(len(parameter_snapshots))
+
+        for row, snapshot in enumerate(parameter_snapshots):
+            values = [
+                snapshot.title,
+                snapshot.formatted_value,
+                snapshot.measurement_unit,
+                snapshot.normal_range,
+                snapshot.status,
+                mode,
+            ]
+
+            for col, cell_value in enumerate(values):
+                item = QTableWidgetItem(cell_value)
+                if col == 4:
+                    self.apply_parameter_status_style(item, snapshot.status)
+                self.parameters_table.setItem(row, col, item)
+
+        self.parameters_table.resizeColumnsToContents()
+
+    def append_trend_points(
+        self,
+        parameter_snapshots: tuple[ParameterSnapshot, ...],
+    ) -> None:
+        if not hasattr(self, "trend_canvas"):
+            return
+
+        snapshot_by_code = {
+            snapshot.code: snapshot for snapshot in parameter_snapshots
+        }
+
+        for sensor_code in self.TREND_SENSOR_CODES:
+            snapshot = snapshot_by_code[sensor_code]
+            values = self.trend_history[sensor_code]
+            values.append(snapshot.value)
+            del values[:-self.MAX_TREND_POINTS]
+
+    def refresh_trend_chart(self) -> None:
+        if not hasattr(self, "trend_canvas"):
+            return
+
+        for axis, sensor_code in zip(self.trend_axes, self.TREND_SENSOR_CODES):
+            definition = self.parameter_definitions_by_code[sensor_code]
+            values = self.trend_history[sensor_code]
+
+            axis.clear()
+            axis.set_title(definition.title, fontsize=9)
+            axis.set_ylabel(definition.measurement_unit, fontsize=8)
+            axis.grid(True, linewidth=0.4, alpha=0.35)
+
+            if values:
+                axis.plot(range(1, len(values) + 1), values, color="#2f6fed", linewidth=1.8)
+                axis.axhline(definition.normal_min, color="#2b8a3e", linewidth=0.8)
+                axis.axhline(definition.normal_max, color="#c92a2a", linewidth=0.8)
+
+        self.trend_canvas.draw_idle()
+
+    def update_process_values(self, save_state: bool = True) -> None:
         state = self.simulator.generate_next_state()
 
         analysis_result = self.deviation_analyzer.analyze(state)
@@ -549,10 +719,16 @@ class MainWindow(QMainWindow):
         self.mode_label.setText(f"Режим: {state.mode}")
         self.status_label.setText(f"Статус: {state.status}")
 
+        parameter_snapshots = build_parameter_snapshots(state)
+        self.update_parameters_table(parameter_snapshots, state.mode)
+        self.append_trend_points(parameter_snapshots)
+        self.refresh_trend_chart()
+
         self.apply_status_style(state.status)
 
         current_time = self.get_current_time()
-        self.database_service.save_process_state(current_time, state)
+        if save_state:
+            self.database_service.save_process_state(current_time, state)
 
         if state.status != self.last_status:
             self.handle_analysis_result(analysis_result)
@@ -651,6 +827,13 @@ class MainWindow(QMainWindow):
             "Безопасный режим",
         ):
             status_item.setBackground(Qt.GlobalColor.red)
+
+    @staticmethod
+    def apply_parameter_status_style(item: QTableWidgetItem, status: str) -> None:
+        if status == "норма":
+            item.setBackground(Qt.GlobalColor.green)
+        else:
+            item.setBackground(Qt.GlobalColor.yellow)
 
     def add_deviation(
         self,

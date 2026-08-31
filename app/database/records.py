@@ -26,3 +26,14 @@ class AuditRecord:
     action: str
     details: str
     level: str
+
+
+@dataclass(frozen=True)
+class SensorDataRecord:
+    timestamp: str
+    sensor_code: str
+    parameter_name: str
+    value: float
+    measurement_unit: str
+    status: str
+    mode: str
