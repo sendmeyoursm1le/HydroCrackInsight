@@ -4,7 +4,8 @@ from pathlib import Path
 
 from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
-from app.users import get_role_definitions
+from app.users import DEMO_USERS, UserAccount, UserSession, get_role_definitions
+from app.users.security import hash_password
 
 
 class DatabaseService:
@@ -16,7 +17,7 @@ class DatabaseService:
     рекомендации, отчеты, сменный журнал и лабораторные результаты.
     """
 
-    SCHEMA_VERSION = "2"
+    SCHEMA_VERSION = "3"
 
     COUNTED_TABLES = (
         "roles",
@@ -30,6 +31,7 @@ class DatabaseService:
         "sensor_data",
         "deviations",
         "events",
+        "audit_log",
         "equipment_statuses",
         "plans",
         "resource_usage",
@@ -295,6 +297,154 @@ class DatabaseService:
                 mode=str(row[8]),
                 status=str(row[9]),
             )
+
+    def get_user_accounts(self) -> tuple[UserAccount, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    users.username,
+                    users.display_name,
+                    users.role_code,
+                    roles.title,
+                    roles.responsibility,
+                    users.is_active
+                FROM users
+                JOIN roles ON roles.code = users.role_code
+                ORDER BY users.username
+                """
+            )
+
+            return tuple(
+                UserAccount(
+                    username=str(row[0]),
+                    display_name=str(row[1]),
+                    role_code=str(row[2]),
+                    role_title=str(row[3]),
+                    responsibility=str(row[4]),
+                    is_active=bool(row[5]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def get_active_user_accounts(self) -> tuple[UserAccount, ...]:
+        return tuple(user for user in self.get_user_accounts() if user.is_active)
+
+    def get_default_user_session(self) -> UserSession:
+        operator_session = self.get_user_session("operator")
+        if operator_session is not None:
+            return operator_session
+
+        user = self.get_active_user_accounts()[0]
+        return UserSession(
+            username=user.username,
+            display_name=user.display_name,
+            role_code=user.role_code,
+            role_title=user.role_title,
+        )
+
+    def get_user_session(self, username: str) -> UserSession | None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    users.username,
+                    users.display_name,
+                    users.role_code,
+                    roles.title,
+                    users.is_active
+                FROM users
+                JOIN roles ON roles.code = users.role_code
+                WHERE users.username = ?
+                """,
+                (username,),
+            )
+
+            row = cursor.fetchone()
+            if row is None or not bool(row[4]):
+                return None
+
+            return UserSession(
+                username=str(row[0]),
+                display_name=str(row[1]),
+                role_code=str(row[2]),
+                role_title=str(row[3]),
+            )
+
+    def authenticate_user(self, username: str, password: str) -> UserSession | None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    users.username,
+                    users.display_name,
+                    users.role_code,
+                    users.password_hash,
+                    users.is_active,
+                    roles.title
+                FROM users
+                JOIN roles ON roles.code = users.role_code
+                WHERE users.username = ?
+                """,
+                (username,),
+            )
+
+            row = cursor.fetchone()
+            if row is None or not bool(row[4]):
+                return None
+
+            expected_hash = str(row[3])
+            if hash_password(username, password) != expected_hash:
+                return None
+
+            return UserSession(
+                username=str(row[0]),
+                display_name=str(row[1]),
+                role_code=str(row[2]),
+                role_title=str(row[5]),
+            )
+
+    def save_audit_event(
+        self,
+        timestamp: str,
+        username: str,
+        role_code: str,
+        action: str,
+        details: str,
+        level: str = "INFO",
+    ) -> None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO audit_log (
+                    timestamp,
+                    username,
+                    role_code,
+                    action,
+                    details,
+                    level
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    username,
+                    role_code,
+                    action,
+                    details,
+                    level,
+                ),
+            )
+
+            connection.commit()
 
     def save_deviation(
         self,
@@ -626,6 +776,22 @@ class DatabaseService:
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                username TEXT NOT NULL,
+                role_code TEXT NOT NULL,
+                action TEXT NOT NULL,
+                details TEXT NOT NULL,
+                level TEXT NOT NULL,
+                FOREIGN KEY(username) REFERENCES users(username),
+                FOREIGN KEY(role_code) REFERENCES roles(code)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS equipment_statuses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -747,25 +913,47 @@ class DatabaseService:
                 (role.code, role.title, role.responsibility),
             )
 
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO users (
-                username,
-                display_name,
-                role_code,
-                password_hash,
-                is_active
+        for user in DEMO_USERS:
+            password_hash = hash_password(user.username, user.password)
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO users (
+                    username,
+                    display_name,
+                    role_code,
+                    password_hash,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    user.username,
+                    user.display_name,
+                    user.role_code,
+                    password_hash,
+                    1,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "operator",
-                "Демо-оператор",
-                "operator",
-                "demo-password-placeholder",
-                1,
-            ),
-        )
+
+            cursor.execute(
+                """
+                UPDATE users
+                SET
+                    display_name = ?,
+                    role_code = ?,
+                    password_hash = ?,
+                    is_active = 1
+                WHERE username = ?
+                    AND password_hash = 'demo-password-placeholder'
+                """,
+                (
+                    user.display_name,
+                    user.role_code,
+                    password_hash,
+                    user.username,
+                ),
+            )
 
         cursor.execute(
             """

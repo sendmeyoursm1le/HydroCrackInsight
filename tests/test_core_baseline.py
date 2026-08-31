@@ -9,7 +9,14 @@ from app.models.equipment import create_default_equipment
 from app.models.process_state import ProcessState
 from app.monitoring.deviation_analyzer import DeviationAnalyzer
 from app.simulation.sensor_simulator import SensorSimulator
-from app.users import get_role_definitions
+from app.users import (
+    DEMO_USERS,
+    SIMULATE_EMERGENCY,
+    VIEW_DATABASE_STATISTICS,
+    get_accessible_tabs,
+    get_role_definitions,
+    has_permission,
+)
 
 
 class DeviationAnalyzerTest(unittest.TestCase):
@@ -78,7 +85,7 @@ class DatabaseServiceTest(unittest.TestCase):
             counts = database.get_counts()
 
             self.assertEqual(counts["roles"], len(get_role_definitions()))
-            self.assertEqual(counts["users"], 1)
+            self.assertEqual(counts["users"], len(DEMO_USERS))
             self.assertEqual(counts["units"], 1)
             self.assertEqual(counts["equipment_catalog"], len(create_default_equipment()))
             self.assertEqual(counts["sensors"], len(DatabaseService.SENSOR_DEFINITIONS))
@@ -153,6 +160,47 @@ class DatabaseServiceTest(unittest.TestCase):
 
             self.assertEqual(counts["deviations"], 1)
             self.assertEqual(counts["recommendations"], 1)
+
+    def test_database_authenticates_demo_users(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            operator_session = database.authenticate_user("operator", "demo")
+            technologist_session = database.authenticate_user("technologist", "demo")
+
+            self.assertIsNotNone(operator_session)
+            self.assertIsNotNone(technologist_session)
+            self.assertEqual(operator_session.role_code, "operator")
+            self.assertEqual(technologist_session.role_code, "technologist")
+            self.assertIsNone(database.authenticate_user("operator", "wrong"))
+
+    def test_database_saves_audit_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_audit_event(
+                timestamp="01.01.2026 00:00:00",
+                username="operator",
+                role_code="operator",
+                action="login",
+                details="Вход в систему",
+            )
+
+            counts = database.get_counts()
+
+            self.assertEqual(counts["audit_log"], 1)
+
+    def test_role_permissions_limit_actions_and_tabs(self) -> None:
+        self.assertTrue(has_permission("operator", SIMULATE_EMERGENCY))
+        self.assertFalse(has_permission("manager", SIMULATE_EMERGENCY))
+        self.assertTrue(has_permission("manager", VIEW_DATABASE_STATISTICS))
+        self.assertFalse(has_permission("operator", VIEW_DATABASE_STATISTICS))
+        self.assertIn("users", get_accessible_tabs("administrator"))
+        self.assertNotIn("users", get_accessible_tabs("operator"))
 
 
 class ProjectStructureTest(unittest.TestCase):

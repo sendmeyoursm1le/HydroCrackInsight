@@ -20,21 +20,38 @@ from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.database.database_service import DatabaseService
 from app.models.equipment import Equipment, create_default_equipment
 from app.simulation.sensor_simulator import SensorSimulator
+from app.users import (
+    CONTROL_MONITORING,
+    RESET_EMERGENCY,
+    RESET_EQUIPMENT_STATUSES,
+    SIMULATE_EMERGENCY,
+    VIEW_DATABASE_STATISTICS,
+    UserSession,
+    get_accessible_tabs,
+    has_permission,
+)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        database_service: DatabaseService | None = None,
+        current_user: UserSession | None = None,
+    ) -> None:
         super().__init__()
 
-        self.setWindowTitle("HydroCrack Insight")
         self.resize(1200, 750)
 
         self.simulator = SensorSimulator()
         self.deviation_analyzer = DeviationAnalyzer()
         self.emergency_service = EmergencyService()
 
-        self.database_service = DatabaseService()
+        self.database_service = database_service or DatabaseService()
         self.database_service.initialize_database()
+        self.current_user = current_user or self.database_service.get_default_user_session()
+        self.accessible_tabs = get_accessible_tabs(self.current_user.role_code)
+
+        self.setWindowTitle(f"HydroCrack Insight - {self.current_user.role_title}")
 
         restored_state = self.database_service.get_last_process_state()
         if restored_state is not None:
@@ -49,13 +66,18 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
 
-        self.tabs.addTab(self.create_monitoring_tab(), "Мониторинг")
-        self.tabs.addTab(self.create_equipment_tab(), "Оборудование")
-        self.tabs.addTab(self.create_deviations_tab(), "Отклонения")
-        self.tabs.addTab(self.create_reports_tab(), "Отчеты")
-        self.tabs.addTab(self.create_logs_tab(), "Журнал")
+        self.add_tab_if_allowed("monitoring", "Мониторинг", self.create_monitoring_tab)
+        self.add_tab_if_allowed("equipment", "Оборудование", self.create_equipment_tab)
+        self.add_tab_if_allowed("deviations", "Отклонения", self.create_deviations_tab)
+        self.add_tab_if_allowed("reports", "Отчеты", self.create_reports_tab)
+        self.add_tab_if_allowed("logs", "Журнал", self.create_logs_tab)
+        self.add_tab_if_allowed("users", "Пользователи", self.create_users_tab)
 
         self.setCentralWidget(self.tabs)
+        self.statusBar().showMessage(
+            f"Пользователь: {self.current_user.display_name} | "
+            f"Роль: {self.current_user.role_title}"
+        )
 
         self.add_log("INFO", "Система HydroCrack Insight запущена")
         self.add_log("INFO", "Главное окно успешно загружено")
@@ -63,6 +85,47 @@ class MainWindow(QMainWindow):
         if restored_state is not None:
             self.add_log("INFO", "Восстановлено последнее сохраненное состояние процесса")
         self.update_process_values()
+
+    def add_tab_if_allowed(self, tab_code: str, title: str, factory) -> None:
+        if tab_code in self.accessible_tabs:
+            self.tabs.addTab(factory(), title)
+
+    def user_can(self, permission: str) -> bool:
+        return has_permission(self.current_user.role_code, permission)
+
+    def configure_button_permission(
+        self,
+        button: QPushButton,
+        permission: str,
+    ) -> None:
+        button.setEnabled(self.user_can(permission))
+        if not button.isEnabled():
+            button.setToolTip(f"Недоступно для роли: {self.current_user.role_title}")
+
+    def require_permission(self, permission: str, action_name: str) -> bool:
+        if self.user_can(permission):
+            return True
+
+        message = (
+            f"Доступ запрещен для роли '{self.current_user.role_title}': {action_name}"
+        )
+        self.add_log("WARNING", message)
+        self.audit_action(
+            action="access_denied",
+            details=action_name,
+            level="WARNING",
+        )
+        return False
+
+    def audit_action(self, action: str, details: str, level: str = "INFO") -> None:
+        self.database_service.save_audit_event(
+            timestamp=self.get_current_time(),
+            username=self.current_user.username,
+            role_code=self.current_user.role_code,
+            action=action,
+            details=details,
+            level=level,
+        )
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -131,6 +194,11 @@ class MainWindow(QMainWindow):
         self.emergency_button.clicked.connect(self.simulate_emergency)
         self.reset_button.clicked.connect(self.reset_emergency_state)
 
+        self.configure_button_permission(self.start_button, CONTROL_MONITORING)
+        self.configure_button_permission(self.stop_button, CONTROL_MONITORING)
+        self.configure_button_permission(self.emergency_button, SIMULATE_EMERGENCY)
+        self.configure_button_permission(self.reset_button, RESET_EMERGENCY)
+
         buttons_layout.addWidget(self.start_button)
         buttons_layout.addWidget(self.stop_button)
         buttons_layout.addWidget(self.emergency_button)
@@ -158,12 +226,16 @@ class MainWindow(QMainWindow):
             ["Оборудование", "Тип", "Состояние", "Описание"]
         )
 
-        reset_equipment_button = QPushButton("Сбросить статусы оборудования")
-        reset_equipment_button.clicked.connect(self.reset_equipment_statuses)
+        self.reset_equipment_button = QPushButton("Сбросить статусы оборудования")
+        self.reset_equipment_button.clicked.connect(self.reset_equipment_statuses)
+        self.configure_button_permission(
+            self.reset_equipment_button,
+            RESET_EQUIPMENT_STATUSES,
+        )
 
         layout.addWidget(title)
         layout.addWidget(self.equipment_table)
-        layout.addWidget(reset_equipment_button)
+        layout.addWidget(self.reset_equipment_button)
 
         widget.setLayout(layout)
 
@@ -221,6 +293,10 @@ class MainWindow(QMainWindow):
         database_stats_button = QPushButton("Показать статистику БД")
 
         database_stats_button.clicked.connect(self.show_database_statistics)
+        self.configure_button_permission(
+            database_stats_button,
+            VIEW_DATABASE_STATISTICS,
+        )
 
         layout.addWidget(title)
         layout.addWidget(description)
@@ -250,27 +326,82 @@ class MainWindow(QMainWindow):
         widget.setLayout(layout)
         return widget
 
+    def create_users_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        title = QLabel("Пользователи и роли")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+
+        self.users_table = QTableWidget()
+        self.users_table.setColumnCount(5)
+        self.users_table.setHorizontalHeaderLabels(
+            ["Логин", "Имя", "Роль", "Активен", "Ответственность"]
+        )
+
+        user_accounts = self.database_service.get_user_accounts()
+        self.users_table.setRowCount(len(user_accounts))
+
+        for row, account in enumerate(user_accounts):
+            self.users_table.setItem(row, 0, QTableWidgetItem(account.username))
+            self.users_table.setItem(row, 1, QTableWidgetItem(account.display_name))
+            self.users_table.setItem(row, 2, QTableWidgetItem(account.role_title))
+            self.users_table.setItem(
+                row,
+                3,
+                QTableWidgetItem("Да" if account.is_active else "Нет"),
+            )
+            self.users_table.setItem(row, 4, QTableWidgetItem(account.responsibility))
+
+        self.users_table.resizeColumnsToContents()
+
+        layout.addWidget(title)
+        layout.addWidget(self.users_table)
+
+        widget.setLayout(layout)
+        return widget
+
     def start_monitoring(self) -> None:
+        if not self.require_permission(CONTROL_MONITORING, "запуск мониторинга"):
+            return
+
         self.simulator.reset_to_normal()
         self.simulator.start()
         self.timer.start()
         self.last_status = "норма"
         self.add_log("INFO", "Мониторинг технологического процесса запущен")
+        self.audit_action("monitoring_started", "Запуск мониторинга")
 
     def stop_monitoring(self) -> None:
+        if not self.require_permission(CONTROL_MONITORING, "остановка мониторинга"):
+            return
+
         self.simulator.stop()
         self.timer.stop()
         self.update_process_values()
         self.add_log("INFO", "Мониторинг технологического процесса остановлен")
+        self.audit_action("monitoring_stopped", "Остановка мониторинга")
 
     def simulate_emergency(self) -> None:
+        if not self.require_permission(SIMULATE_EMERGENCY, "симуляция аварии"):
+            return
+
         self.simulator.start()
         self.timer.start()
 
         scenario_name = self.simulator.simulate_emergency()
         self.add_log("WARNING", f"Запущен сценарий отклонения: {scenario_name}")
+        self.audit_action(
+            action="emergency_simulated",
+            details=f"Запущен сценарий отклонения: {scenario_name}",
+            level="WARNING",
+        )
 
     def reset_emergency_state(self) -> None:
+        if not self.require_permission(RESET_EMERGENCY, "сброс аварийного состояния"):
+            return
+
         self.simulator.reset_to_normal()
         self.emergency_service.reset_equipment(self.equipment_list)
         self.update_equipment_table()
@@ -287,8 +418,15 @@ class MainWindow(QMainWindow):
         )
 
         self.update_process_values()
+        self.audit_action("emergency_reset", "Сброс аварийного состояния")
 
     def reset_equipment_statuses(self) -> None:
+        if not self.require_permission(
+            RESET_EQUIPMENT_STATUSES,
+            "сброс статусов оборудования",
+        ):
+            return
+
         self.emergency_service.reset_equipment(self.equipment_list)
         self.update_equipment_table()
 
@@ -298,6 +436,7 @@ class MainWindow(QMainWindow):
         )
 
         self.add_log("INFO", "Статусы оборудования сброшены вручную")
+        self.audit_action("equipment_statuses_reset", "Сброс статусов оборудования")
 
     def update_process_values(self) -> None:
         state = self.simulator.generate_next_state()
@@ -381,6 +520,9 @@ class MainWindow(QMainWindow):
         )
 
     def update_equipment_table(self) -> None:
+        if not hasattr(self, "equipment_table"):
+            return
+
         self.equipment_table.setRowCount(len(self.equipment_list))
 
         for row, equipment in enumerate(self.equipment_list):
@@ -432,21 +574,22 @@ class MainWindow(QMainWindow):
     ) -> None:
         current_time = self.get_current_time()
 
-        self.deviations_table.insertRow(0)
+        if hasattr(self, "deviations_table"):
+            self.deviations_table.insertRow(0)
 
-        values = [
-            current_time,
-            parameter,
-            value,
-            level,
-            message,
-            recommendation,
-        ]
+            values = [
+                current_time,
+                parameter,
+                value,
+                level,
+                message,
+                recommendation,
+            ]
 
-        for col, cell_value in enumerate(values):
-            self.deviations_table.setItem(0, col, QTableWidgetItem(cell_value))
+            for col, cell_value in enumerate(values):
+                self.deviations_table.setItem(0, col, QTableWidgetItem(cell_value))
 
-        self.deviations_table.resizeColumnsToContents()
+            self.deviations_table.resizeColumnsToContents()
 
         self.database_service.save_deviation(
             timestamp=current_time,
@@ -468,6 +611,12 @@ class MainWindow(QMainWindow):
         )
 
     def show_database_statistics(self) -> None:
+        if not self.require_permission(
+            VIEW_DATABASE_STATISTICS,
+            "просмотр статистики БД",
+        ):
+            return
+
         counts = self.database_service.get_counts()
 
         self.add_log(
@@ -486,6 +635,7 @@ class MainWindow(QMainWindow):
                 f"статусов оборудования — {counts['equipment_statuses']}"
             ),
         )
+        self.audit_action("database_statistics_viewed", "Просмотр статистики БД")
 
     @staticmethod
     def get_current_time() -> str:
