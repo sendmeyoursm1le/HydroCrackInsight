@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from app.models.process_state import ProcessState
+from app.monitoring.operating_mode import OperatingModeProfile
 
 
 @dataclass(frozen=True)
@@ -103,20 +104,15 @@ PARAMETER_DEFINITIONS: tuple[ParameterDefinition, ...] = (
 )
 
 
-def build_parameter_snapshots(state: ProcessState) -> tuple[ParameterSnapshot, ...]:
+def build_parameter_snapshots(
+    state: ProcessState,
+    operating_mode_profile: OperatingModeProfile | None = None,
+) -> tuple[ParameterSnapshot, ...]:
     return tuple(
-        ParameterSnapshot(
-            code=definition.code,
-            title=definition.title,
-            value=float(getattr(state, definition.state_attribute)),
-            measurement_unit=definition.measurement_unit,
-            normal_min=definition.normal_min,
-            normal_max=definition.normal_max,
-            status=classify_parameter_status(
-                value=float(getattr(state, definition.state_attribute)),
-                normal_min=definition.normal_min,
-                normal_max=definition.normal_max,
-            ),
+        _build_parameter_snapshot(
+            state=state,
+            definition=definition,
+            operating_mode_profile=operating_mode_profile,
         )
         for definition in PARAMETER_DEFINITIONS
     )
@@ -131,3 +127,35 @@ def classify_parameter_status(
         return "норма"
 
     return "отклонение"
+
+
+def _build_parameter_snapshot(
+    state: ProcessState,
+    definition: ParameterDefinition,
+    operating_mode_profile: OperatingModeProfile | None,
+) -> ParameterSnapshot:
+    mode_limit = (
+        operating_mode_profile.get_limit(definition.code)
+        if operating_mode_profile is not None
+        else None
+    )
+    normal_min = mode_limit.min_value if mode_limit is not None else definition.normal_min
+    normal_max = mode_limit.max_value if mode_limit is not None else definition.normal_max
+    measurement_unit = (
+        mode_limit.measurement_unit if mode_limit is not None else definition.measurement_unit
+    )
+    value = float(getattr(state, definition.state_attribute))
+
+    return ParameterSnapshot(
+        code=definition.code,
+        title=definition.title,
+        value=value,
+        measurement_unit=measurement_unit,
+        normal_min=normal_min,
+        normal_max=normal_max,
+        status=classify_parameter_status(
+            value=value,
+            normal_min=normal_min,
+            normal_max=normal_max,
+        ),
+    )

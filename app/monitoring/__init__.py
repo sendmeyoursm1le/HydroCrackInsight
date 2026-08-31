@@ -1,4 +1,9 @@
 from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
+from app.monitoring.operating_mode import (
+    OperatingMode,
+    OperatingModeLimit,
+    OperatingModeProfile,
+)
 from app.monitoring.parameter_snapshot import (
     PARAMETER_DEFINITIONS,
     ParameterDefinition,
@@ -14,6 +19,9 @@ from app.monitoring.process_data_importer import (
 __all__ = [
     "DeviationAnalyzer",
     "DeviationResult",
+    "OperatingMode",
+    "OperatingModeLimit",
+    "OperatingModeProfile",
     "PARAMETER_DEFINITIONS",
     "ParameterDefinition",
     "ParameterSnapshot",

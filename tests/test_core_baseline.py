@@ -18,6 +18,7 @@ from app.monitoring.parameter_snapshot import (
 from app.monitoring.process_data_importer import ProcessDataImporter
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
+    CHANGE_OPERATING_MODE,
     DEMO_USERS,
     IMPORT_PROCESS_DATA,
     SIMULATE_EMERGENCY,
@@ -45,6 +46,51 @@ class DeviationAnalyzerTest(unittest.TestCase):
         self.assertEqual(result.status, "авария")
         self.assertEqual(result.parameter, "Температура")
         self.assertTrue(result.is_emergency)
+
+    def test_mode_limits_create_warning_before_hardcoded_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            profile = database.get_operating_mode_profile("balanced")
+
+            result = DeviationAnalyzer().analyze(
+                ProcessState(temperature=420.0),
+                operating_mode_profile=profile,
+            )
+
+            self.assertEqual(result.status, "предупреждение")
+            self.assertEqual(result.parameter, "Температура реактора")
+            self.assertIn("Нормальный режим", result.message)
+
+    def test_mode_limits_create_critical_deviation_by_margin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            profile = database.get_operating_mode_profile("balanced")
+
+            result = DeviationAnalyzer().analyze(
+                ProcessState(feed_flow=60.0),
+                operating_mode_profile=profile,
+            )
+
+            self.assertEqual(result.status, "авария")
+            self.assertEqual(result.parameter, "Расход сырья")
+
+    def test_mode_limits_override_legacy_warning_thresholds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            profile = database.get_operating_mode_profile("deep_hydrocracking")
+
+            result = DeviationAnalyzer().analyze(
+                ProcessState(temperature=432.0),
+                operating_mode_profile=profile,
+            )
+
+            self.assertEqual(result.status, "норма")
 
 
 class EmergencyServiceTest(unittest.TestCase):
@@ -83,6 +129,22 @@ class MonitoringParameterTest(unittest.TestCase):
         self.assertEqual(snapshot_by_code["reactor_temperature"].status, "отклонение")
         self.assertEqual(snapshot_by_code["reactor_pressure"].status, "норма")
         self.assertEqual(classify_parameter_status(10.0, 20.0, 30.0), "отклонение")
+
+    def test_parameter_snapshots_use_operating_mode_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            profile = database.get_operating_mode_profile("energy_saving")
+
+            snapshots = build_parameter_snapshots(
+                ProcessState(temperature=400.0),
+                operating_mode_profile=profile,
+            )
+            snapshot_by_code = {snapshot.code: snapshot for snapshot in snapshots}
+
+            self.assertEqual(snapshot_by_code["reactor_temperature"].normal_max, 390.0)
+            self.assertEqual(snapshot_by_code["reactor_temperature"].status, "отклонение")
 
 
 class ProcessDataImporterTest(unittest.TestCase):
@@ -152,6 +214,26 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(counts["sensors"], len(DatabaseService.SENSOR_DEFINITIONS))
             self.assertEqual(counts["operating_modes"], len(DatabaseService.OPERATING_MODES))
             self.assertEqual(counts["operating_mode_limits"], 20)
+
+    def test_database_manages_active_operating_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            self.assertEqual(database.get_active_operating_mode_code(), "balanced")
+
+            database.set_active_operating_mode("energy_saving")
+            profile = database.get_active_operating_mode_profile()
+
+            self.assertEqual(profile.mode.code, "energy_saving")
+            self.assertEqual(
+                profile.limits["reactor_temperature"].max_value,
+                390.0,
+            )
+
+            with self.assertRaises(ValueError):
+                database.set_active_operating_mode("missing_mode")
 
     def test_database_saves_baseline_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -227,6 +309,27 @@ class DatabaseServiceTest(unittest.TestCase):
 
             self.assertEqual(temperatures, [391.0, 392.0])
             self.assertEqual(pressures, [150.0, 150.0])
+
+    def test_database_saves_sensor_status_by_active_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            database.set_active_operating_mode("energy_saving")
+            profile = database.get_active_operating_mode_profile()
+
+            database.save_process_state(
+                "01.01.2026 00:00:00",
+                ProcessState(temperature=400.0),
+                operating_mode_profile=profile,
+            )
+            records = database.get_recent_sensor_data(
+                sensor_codes=("reactor_temperature",),
+                limit_per_sensor=1,
+            )
+
+            self.assertEqual(records[0].status, "отклонение")
+            self.assertEqual(records[0].mode, "Энергосберегающий режим")
 
     def test_database_restores_latest_equipment_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -337,6 +440,8 @@ class DatabaseServiceTest(unittest.TestCase):
         self.assertFalse(has_permission("operator", VIEW_DATABASE_STATISTICS))
         self.assertTrue(has_permission("technologist", IMPORT_PROCESS_DATA))
         self.assertFalse(has_permission("manager", IMPORT_PROCESS_DATA))
+        self.assertTrue(has_permission("technologist", CHANGE_OPERATING_MODE))
+        self.assertFalse(has_permission("operator", CHANGE_OPERATING_MODE))
         self.assertIn("users", get_accessible_tabs("administrator"))
         self.assertNotIn("users", get_accessible_tabs("operator"))
 

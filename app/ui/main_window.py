@@ -6,6 +6,7 @@ from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout,
+    QComboBox,
     QHBoxLayout,
     QFileDialog,
     QLabel,
@@ -32,6 +33,7 @@ from app.monitoring.parameter_snapshot import (
 from app.monitoring.process_data_importer import ProcessDataImporter
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
+    CHANGE_OPERATING_MODE,
     CONTROL_MONITORING,
     IMPORT_PROCESS_DATA,
     RESET_EMERGENCY,
@@ -73,6 +75,10 @@ class MainWindow(QMainWindow):
         self.database_service.initialize_database()
         self.current_user = current_user or self.database_service.get_default_user_session()
         self.accessible_tabs = get_accessible_tabs(self.current_user.role_code)
+        self.operating_modes = self.database_service.get_operating_modes()
+        self.active_operating_mode_profile = (
+            self.database_service.get_active_operating_mode_profile()
+        )
 
         self.setWindowTitle(f"HydroCrack Insight - {self.current_user.role_title}")
 
@@ -301,6 +307,34 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.mode_label, 4, 0)
         grid.addWidget(self.status_label, 4, 1)
 
+        mode_layout = QHBoxLayout()
+        self.operating_mode_label = QLabel("Технологический режим:")
+        self.operating_mode_combo = QComboBox()
+        for mode in self.operating_modes:
+            self.operating_mode_combo.addItem(mode.title, mode.code)
+
+        active_mode_index = self.operating_mode_combo.findData(
+            self.active_operating_mode_profile.mode.code
+        )
+        if active_mode_index >= 0:
+            self.operating_mode_combo.setCurrentIndex(active_mode_index)
+
+        self.operating_mode_combo.currentIndexChanged.connect(
+            self.change_operating_mode
+        )
+        self.operating_mode_combo.setEnabled(self.user_can(CHANGE_OPERATING_MODE))
+        if not self.operating_mode_combo.isEnabled():
+            self.operating_mode_combo.setToolTip(
+                f"Недоступно для роли: {self.current_user.role_title}"
+            )
+
+        self.operating_mode_goal_label = QLabel(self.active_operating_mode_profile.mode.goal)
+        self.operating_mode_goal_label.setWordWrap(True)
+
+        mode_layout.addWidget(self.operating_mode_label)
+        mode_layout.addWidget(self.operating_mode_combo)
+        mode_layout.addWidget(self.operating_mode_goal_label)
+
         self.parameters_table = QTableWidget()
         self.parameters_table.setColumnCount(6)
         self.parameters_table.setHorizontalHeaderLabels(
@@ -340,6 +374,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addLayout(grid)
+        layout.addLayout(mode_layout)
         layout.addWidget(self.parameters_table)
         layout.addWidget(self.trend_canvas)
         layout.addLayout(buttons_layout)
@@ -615,7 +650,11 @@ class MainWindow(QMainWindow):
 
         for index, state in enumerate(import_result.states):
             timestamp = import_result.timestamps[index] or self.get_current_time()
-            self.database_service.save_process_state(timestamp, state)
+            self.database_service.save_process_state(
+                timestamp,
+                state,
+                operating_mode_profile=self.active_operating_mode_profile,
+            )
 
         if import_result.last_state is not None:
             self.simulator.current_state = import_result.last_state
@@ -631,10 +670,56 @@ class MainWindow(QMainWindow):
             details=f"Импортировано строк: {import_result.imported_count}",
         )
 
+    def change_operating_mode(self, _index: int | None = None) -> None:
+        if not hasattr(self, "operating_mode_combo"):
+            return
+
+        mode_code = str(self.operating_mode_combo.currentData())
+        if mode_code == self.active_operating_mode_profile.mode.code:
+            return
+
+        if not self.require_permission(
+            CHANGE_OPERATING_MODE,
+            "смена технологического режима",
+        ):
+            active_mode_index = self.operating_mode_combo.findData(
+                self.active_operating_mode_profile.mode.code
+            )
+            if active_mode_index >= 0:
+                self.operating_mode_combo.blockSignals(True)
+                self.operating_mode_combo.setCurrentIndex(active_mode_index)
+                self.operating_mode_combo.blockSignals(False)
+            return
+
+        previous_mode_title = self.active_operating_mode_profile.mode.title
+        self.database_service.set_active_operating_mode(mode_code)
+        self.active_operating_mode_profile = (
+            self.database_service.get_active_operating_mode_profile()
+        )
+        self.operating_mode_goal_label.setText(
+            self.active_operating_mode_profile.mode.goal
+        )
+
+        self.add_log(
+            "INFO",
+            (
+                f"Технологический режим изменен: {previous_mode_title} -> "
+                f"{self.active_operating_mode_profile.mode.title}"
+            ),
+        )
+        self.audit_action(
+            action="operating_mode_changed",
+            details=(
+                f"{previous_mode_title} -> "
+                f"{self.active_operating_mode_profile.mode.title}"
+            ),
+        )
+        self.update_process_values(save_state=False)
+
     def update_parameters_table(
         self,
         parameter_snapshots: tuple[ParameterSnapshot, ...],
-        mode: str,
+        mode_title: str,
     ) -> None:
         if not hasattr(self, "parameters_table"):
             return
@@ -648,7 +733,7 @@ class MainWindow(QMainWindow):
                 snapshot.measurement_unit,
                 snapshot.normal_range,
                 snapshot.status,
-                mode,
+                mode_title,
             ]
 
             for col, cell_value in enumerate(values):
@@ -682,6 +767,13 @@ class MainWindow(QMainWindow):
 
         for axis, sensor_code in zip(self.trend_axes, self.TREND_SENSOR_CODES):
             definition = self.parameter_definitions_by_code[sensor_code]
+            mode_limit = self.active_operating_mode_profile.get_limit(sensor_code)
+            normal_min = (
+                mode_limit.min_value if mode_limit is not None else definition.normal_min
+            )
+            normal_max = (
+                mode_limit.max_value if mode_limit is not None else definition.normal_max
+            )
             values = self.trend_history[sensor_code]
 
             axis.clear()
@@ -691,15 +783,18 @@ class MainWindow(QMainWindow):
 
             if values:
                 axis.plot(range(1, len(values) + 1), values, color="#2f6fed", linewidth=1.8)
-                axis.axhline(definition.normal_min, color="#2b8a3e", linewidth=0.8)
-                axis.axhline(definition.normal_max, color="#c92a2a", linewidth=0.8)
+                axis.axhline(normal_min, color="#2b8a3e", linewidth=0.8)
+                axis.axhline(normal_max, color="#c92a2a", linewidth=0.8)
 
         self.trend_canvas.draw_idle()
 
     def update_process_values(self, save_state: bool = True) -> None:
         state = self.simulator.generate_next_state()
 
-        analysis_result = self.deviation_analyzer.analyze(state)
+        analysis_result = self.deviation_analyzer.analyze(
+            state,
+            operating_mode_profile=self.active_operating_mode_profile,
+        )
         state.status = analysis_result.status
 
         self.temperature_label.setText(f"Температура: {state.temperature:.1f} °C")
@@ -719,8 +814,14 @@ class MainWindow(QMainWindow):
         self.mode_label.setText(f"Режим: {state.mode}")
         self.status_label.setText(f"Статус: {state.status}")
 
-        parameter_snapshots = build_parameter_snapshots(state)
-        self.update_parameters_table(parameter_snapshots, state.mode)
+        parameter_snapshots = build_parameter_snapshots(
+            state,
+            operating_mode_profile=self.active_operating_mode_profile,
+        )
+        self.update_parameters_table(
+            parameter_snapshots,
+            self.active_operating_mode_profile.mode.title,
+        )
         self.append_trend_points(parameter_snapshots)
         self.refresh_trend_chart()
 
@@ -728,7 +829,11 @@ class MainWindow(QMainWindow):
 
         current_time = self.get_current_time()
         if save_state:
-            self.database_service.save_process_state(current_time, state)
+            self.database_service.save_process_state(
+                current_time,
+                state,
+                operating_mode_profile=self.active_operating_mode_profile,
+            )
 
         if state.status != self.last_status:
             self.handle_analysis_result(analysis_result)

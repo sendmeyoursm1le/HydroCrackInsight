@@ -9,6 +9,11 @@ from app.database.records import (
     SensorDataRecord,
 )
 from app.monitoring.parameter_snapshot import PARAMETER_DEFINITIONS
+from app.monitoring.operating_mode import (
+    OperatingMode,
+    OperatingModeLimit,
+    OperatingModeProfile,
+)
 from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
 from app.users import DEMO_USERS, UserAccount, UserSession, get_role_definitions
@@ -175,9 +180,15 @@ class DatabaseService:
 
             connection.commit()
 
-    def save_process_state(self, timestamp: str, state: ProcessState) -> None:
+    def save_process_state(
+        self,
+        timestamp: str,
+        state: ProcessState,
+        operating_mode_profile: OperatingModeProfile | None = None,
+    ) -> None:
         with closing(self._connect()) as connection:
             cursor = connection.cursor()
+            mode_profile = operating_mode_profile or self.get_active_operating_mode_profile()
 
             cursor.execute(
                 """
@@ -211,8 +222,8 @@ class DatabaseService:
                 ),
             )
 
-            self._save_sensor_data_rows(cursor, timestamp, state)
-            self._save_resource_usage_rows(cursor, timestamp, state)
+            self._save_sensor_data_rows(cursor, timestamp, state, mode_profile)
+            self._save_resource_usage_rows(cursor, timestamp, state, mode_profile)
             connection.commit()
 
     def get_last_process_state(self) -> ProcessState | None:
@@ -400,6 +411,151 @@ class DatabaseService:
                     mode=str(row[6]),
                 )
                 for row in cursor.fetchall()
+            )
+
+    def get_operating_modes(self) -> tuple[OperatingMode, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    code,
+                    title,
+                    feedstock_type,
+                    goal,
+                    is_active
+                FROM operating_modes
+                ORDER BY title
+                """
+            )
+
+            return tuple(
+                OperatingMode(
+                    code=str(row[0]),
+                    title=str(row[1]),
+                    feedstock_type=str(row[2]),
+                    goal=str(row[3]),
+                    is_active=bool(row[4]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def get_active_operating_mode_code(self) -> str:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                "SELECT value FROM database_meta WHERE key = 'active_mode_code'"
+            )
+            row = cursor.fetchone()
+
+            return str(row[0]) if row is not None else "balanced"
+
+    def set_active_operating_mode(self, mode_code: str) -> None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM operating_modes
+                WHERE code = ?
+                    AND is_active = 1
+                """,
+                (mode_code,),
+            )
+
+            if int(cursor.fetchone()[0]) == 0:
+                raise ValueError(f"Технологический режим не найден: {mode_code}")
+
+            cursor.execute(
+                """
+                INSERT INTO database_meta (key, value)
+                VALUES ('active_mode_code', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (mode_code,),
+            )
+
+            connection.commit()
+
+    def get_active_operating_mode_profile(self) -> OperatingModeProfile:
+        mode_code = self.get_active_operating_mode_code()
+        profile = self.get_operating_mode_profile(mode_code)
+
+        if profile is None:
+            self.set_active_operating_mode("balanced")
+            profile = self.get_operating_mode_profile("balanced")
+
+        if profile is None:
+            raise RuntimeError("Не удалось загрузить активный технологический режим.")
+
+        return profile
+
+    def get_operating_mode_profile(
+        self,
+        mode_code: str,
+    ) -> OperatingModeProfile | None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    code,
+                    title,
+                    feedstock_type,
+                    goal,
+                    is_active
+                FROM operating_modes
+                WHERE code = ?
+                """,
+                (mode_code,),
+            )
+            mode_row = cursor.fetchone()
+
+            if mode_row is None:
+                return None
+
+            cursor.execute(
+                """
+                SELECT
+                    operating_mode_limits.mode_code,
+                    operating_mode_limits.parameter_code,
+                    sensors.parameter_name,
+                    operating_mode_limits.min_value,
+                    operating_mode_limits.max_value,
+                    operating_mode_limits.measurement_unit
+                FROM operating_mode_limits
+                JOIN sensors ON sensors.code = operating_mode_limits.parameter_code
+                WHERE operating_mode_limits.mode_code = ?
+                ORDER BY sensors.parameter_name
+                """,
+                (mode_code,),
+            )
+
+            limits = {
+                str(row[1]): OperatingModeLimit(
+                    mode_code=str(row[0]),
+                    parameter_code=str(row[1]),
+                    parameter_title=str(row[2]),
+                    min_value=float(row[3]),
+                    max_value=float(row[4]),
+                    measurement_unit=str(row[5]),
+                )
+                for row in cursor.fetchall()
+            }
+
+            return OperatingModeProfile(
+                mode=OperatingMode(
+                    code=str(mode_row[0]),
+                    title=str(mode_row[1]),
+                    feedstock_type=str(mode_row[2]),
+                    goal=str(mode_row[3]),
+                    is_active=bool(mode_row[4]),
+                ),
+                limits=limits,
             )
 
     def get_user_accounts(self) -> tuple[UserAccount, ...]:
@@ -752,6 +908,13 @@ class DatabaseService:
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
             (self.SCHEMA_VERSION,),
+        )
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO database_meta (key, value)
+            VALUES ('active_mode_code', 'balanced')
+            """
         )
 
     def _create_reference_schema(self, cursor: sqlite3.Cursor) -> None:
@@ -1203,6 +1366,7 @@ class DatabaseService:
         cursor: sqlite3.Cursor,
         timestamp: str,
         state: ProcessState,
+        operating_mode_profile: OperatingModeProfile,
     ) -> None:
         for sensor_code, state_attribute in self.PROCESS_SENSOR_FIELDS:
             sensor = self._sensor_definitions_by_code[sensor_code]
@@ -1227,8 +1391,12 @@ class DatabaseService:
                     sensor["parameter_name"],
                     value,
                     sensor["measurement_unit"],
-                    self._classify_sensor_status(sensor_code, value),
-                    state.mode,
+                    self._classify_sensor_status(
+                        sensor_code,
+                        value,
+                        operating_mode_profile,
+                    ),
+                    operating_mode_profile.mode.title,
                 ),
             )
 
@@ -1237,6 +1405,7 @@ class DatabaseService:
         cursor: sqlite3.Cursor,
         timestamp: str,
         state: ProcessState,
+        operating_mode_profile: OperatingModeProfile,
     ) -> None:
         for code, name, state_attribute, measurement_unit in self.RESOURCE_FIELDS:
             cursor.execute(
@@ -1257,14 +1426,24 @@ class DatabaseService:
                     name,
                     float(getattr(state, state_attribute)),
                     measurement_unit,
-                    state.mode,
+                    operating_mode_profile.mode.title,
                 ),
             )
 
-    def _classify_sensor_status(self, sensor_code: str, value: float) -> str:
+    def _classify_sensor_status(
+        self,
+        sensor_code: str,
+        value: float,
+        operating_mode_profile: OperatingModeProfile,
+    ) -> str:
         sensor = self._sensor_definitions_by_code[sensor_code]
-        minimum = float(sensor["normal_min"])
-        maximum = float(sensor["normal_max"])
+        mode_limit = operating_mode_profile.get_limit(sensor_code)
+        minimum = (
+            mode_limit.min_value if mode_limit is not None else float(sensor["normal_min"])
+        )
+        maximum = (
+            mode_limit.max_value if mode_limit is not None else float(sensor["normal_max"])
+        )
 
         if minimum <= value <= maximum:
             return "норма"
