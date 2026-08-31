@@ -112,6 +112,49 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(counts["sensor_data"], len(DatabaseService.PROCESS_SENSOR_FIELDS))
             self.assertEqual(counts["resource_usage"], len(DatabaseService.RESOURCE_FIELDS))
 
+    def test_database_reads_shared_events_and_deviations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_event("01.01.2026 00:00:00", "INFO", "first")
+            database.save_event("01.01.2026 00:00:01", "WARNING", "second")
+            database.save_deviation(
+                timestamp="01.01.2026 00:00:02",
+                parameter="Температура",
+                value="460.0 °C",
+                level="critical",
+                message="Перегрев реактора",
+                recommendation="Снизить тепловую нагрузку",
+            )
+
+            recent_events = database.get_recent_events(limit=1)
+            recent_deviations = database.get_recent_deviations()
+
+            self.assertEqual(len(recent_events), 1)
+            self.assertEqual(recent_events[0].message, "second")
+            self.assertEqual(recent_deviations[0].parameter, "Температура")
+
+    def test_database_restores_latest_equipment_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            equipment = create_default_equipment()
+            equipment[0].status = "Авария"
+            equipment[0].description = "Температурное отклонение"
+
+            database.save_equipment_statuses("01.01.2026 00:00:00", equipment)
+            restored_equipment = database.get_equipment_catalog()
+
+            statuses = {item.name: item.status for item in restored_equipment}
+            descriptions = {item.name: item.description for item in restored_equipment}
+
+            self.assertEqual(statuses["Реактор R-101"], "Авария")
+            self.assertEqual(descriptions["Реактор R-101"], "Температурное отклонение")
+
     def test_database_restores_last_process_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "hydrocrack.db"
@@ -193,6 +236,7 @@ class DatabaseServiceTest(unittest.TestCase):
             counts = database.get_counts()
 
             self.assertEqual(counts["audit_log"], 1)
+            self.assertEqual(database.get_recent_audit_events()[0].action, "login")
 
     def test_role_permissions_limit_actions_and_tabs(self) -> None:
         self.assertTrue(has_permission("operator", SIMULATE_EMERGENCY))

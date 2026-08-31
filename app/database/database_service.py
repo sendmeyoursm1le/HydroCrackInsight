@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from app.database.records import AuditRecord, DeviationRecord, EventRecord
 from app.models.equipment import Equipment, create_default_equipment
 from app.models.process_state import ProcessState
 from app.users import DEMO_USERS, UserAccount, UserSession, get_role_definitions
@@ -298,6 +299,100 @@ class DatabaseService:
                 status=str(row[9]),
             )
 
+    def get_equipment_catalog(self) -> list[Equipment]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    name,
+                    equipment_type,
+                    status,
+                    description
+                FROM equipment_catalog
+                ORDER BY id
+                """
+            )
+
+            equipment_list = [
+                Equipment(
+                    name=str(row[0]),
+                    equipment_type=str(row[1]),
+                    status=str(row[2]),
+                    description=str(row[3]),
+                )
+                for row in cursor.fetchall()
+            ]
+
+            return equipment_list or create_default_equipment()
+
+    def get_recent_events(self, limit: int = 100) -> tuple[EventRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    level,
+                    message
+                FROM (
+                    SELECT
+                        id,
+                        timestamp,
+                        level,
+                        message
+                    FROM events
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                ORDER BY id
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                EventRecord(
+                    timestamp=str(row[0]),
+                    level=str(row[1]),
+                    message=str(row[2]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def get_recent_deviations(self, limit: int = 50) -> tuple[DeviationRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    parameter,
+                    value,
+                    level,
+                    message,
+                    recommendation
+                FROM deviations
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                DeviationRecord(
+                    timestamp=str(row[0]),
+                    parameter=str(row[1]),
+                    value=str(row[2]),
+                    level=str(row[3]),
+                    message=str(row[4]),
+                    recommendation=str(row[5]),
+                )
+                for row in cursor.fetchall()
+            )
+
     def get_user_accounts(self) -> tuple[UserAccount, ...]:
         with closing(self._connect()) as connection:
             cursor = connection.cursor()
@@ -445,6 +540,38 @@ class DatabaseService:
             )
 
             connection.commit()
+
+    def get_recent_audit_events(self, limit: int = 50) -> tuple[AuditRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    username,
+                    role_code,
+                    action,
+                    details,
+                    level
+                FROM audit_log
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                AuditRecord(
+                    timestamp=str(row[0]),
+                    username=str(row[1]),
+                    role_code=str(row[2]),
+                    action=str(row[3]),
+                    details=str(row[4]),
+                    level=str(row[5]),
+                )
+                for row in cursor.fetchall()
+            )
 
     def save_deviation(
         self,
@@ -1134,6 +1261,10 @@ class DatabaseService:
             return "норма"
 
         return "отклонение"
+
+    @staticmethod
+    def _normalize_limit(limit: int) -> int:
+        return max(1, min(limit, 500))
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)

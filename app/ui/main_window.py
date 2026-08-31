@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -18,7 +19,7 @@ from PyQt6.QtWidgets import (
 from app.equipment.emergency_service import EmergencyResponse, EmergencyService
 from app.monitoring.deviation_analyzer import DeviationAnalyzer, DeviationResult
 from app.database.database_service import DatabaseService
-from app.models.equipment import Equipment, create_default_equipment
+from app.models.equipment import Equipment
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CONTROL_MONITORING,
@@ -33,6 +34,8 @@ from app.users import (
 
 
 class MainWindow(QMainWindow):
+    switch_user_requested = pyqtSignal()
+
     def __init__(
         self,
         database_service: DatabaseService | None = None,
@@ -57,7 +60,7 @@ class MainWindow(QMainWindow):
         if restored_state is not None:
             self.simulator.current_state = restored_state
 
-        self.equipment_list: list[Equipment] = create_default_equipment()
+        self.equipment_list: list[Equipment] = self.database_service.get_equipment_catalog()
         self.last_status = self.simulator.current_state.status
 
         self.timer = QTimer(self)
@@ -78,6 +81,11 @@ class MainWindow(QMainWindow):
             f"Пользователь: {self.current_user.display_name} | "
             f"Роль: {self.current_user.role_title}"
         )
+        self.switch_user_button = QPushButton("Сменить пользователя")
+        self.switch_user_button.clicked.connect(self.request_user_switch)
+        self.statusBar().addPermanentWidget(self.switch_user_button)
+
+        self.load_persisted_ui_state()
 
         self.add_log("INFO", "Система HydroCrack Insight запущена")
         self.add_log("INFO", "Главное окно успешно загружено")
@@ -86,7 +94,12 @@ class MainWindow(QMainWindow):
             self.add_log("INFO", "Восстановлено последнее сохраненное состояние процесса")
         self.update_process_values()
 
-    def add_tab_if_allowed(self, tab_code: str, title: str, factory) -> None:
+    def add_tab_if_allowed(
+        self,
+        tab_code: str,
+        title: str,
+        factory: Callable[[], QWidget],
+    ) -> None:
         if tab_code in self.accessible_tabs:
             self.tabs.addTab(factory(), title)
 
@@ -126,6 +139,69 @@ class MainWindow(QMainWindow):
             details=details,
             level=level,
         )
+
+    def load_persisted_ui_state(self) -> None:
+        self.populate_deviations_from_database()
+        self.populate_logs_from_database()
+        self.populate_audit_from_database()
+
+    def request_user_switch(self) -> None:
+        self.switch_user_requested.emit()
+
+    def prepare_for_session_switch(self) -> None:
+        self.timer.stop()
+
+    def populate_deviations_from_database(self) -> None:
+        if not hasattr(self, "deviations_table"):
+            return
+
+        records = self.database_service.get_recent_deviations()
+        self.deviations_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.timestamp,
+                record.parameter,
+                record.value,
+                record.level,
+                record.message,
+                record.recommendation,
+            ]
+
+            for col, cell_value in enumerate(values):
+                self.deviations_table.setItem(row, col, QTableWidgetItem(cell_value))
+
+        self.deviations_table.resizeColumnsToContents()
+
+    def populate_logs_from_database(self) -> None:
+        if not hasattr(self, "logs_text"):
+            return
+
+        self.logs_text.clear()
+        for record in self.database_service.get_recent_events():
+            self.append_log_entry(record.timestamp, record.level, record.message)
+
+    def populate_audit_from_database(self) -> None:
+        if not hasattr(self, "audit_table"):
+            return
+
+        records = self.database_service.get_recent_audit_events()
+        self.audit_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.timestamp,
+                record.username,
+                record.role_code,
+                record.action,
+                record.details,
+                record.level,
+            ]
+
+            for col, cell_value in enumerate(values):
+                self.audit_table.setItem(row, col, QTableWidgetItem(cell_value))
+
+        self.audit_table.resizeColumnsToContents()
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -356,8 +432,20 @@ class MainWindow(QMainWindow):
 
         self.users_table.resizeColumnsToContents()
 
+        audit_title = QLabel("Аудит действий")
+        audit_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        audit_title.setStyleSheet("font-size: 18px; font-weight: bold;")
+
+        self.audit_table = QTableWidget()
+        self.audit_table.setColumnCount(6)
+        self.audit_table.setHorizontalHeaderLabels(
+            ["Время", "Пользователь", "Роль", "Действие", "Описание", "Уровень"]
+        )
+
         layout.addWidget(title)
         layout.addWidget(self.users_table)
+        layout.addWidget(audit_title)
+        layout.addWidget(self.audit_table)
 
         widget.setLayout(layout)
         return widget
@@ -602,13 +690,17 @@ class MainWindow(QMainWindow):
 
     def add_log(self, level: str, message: str) -> None:
         current_time = self.get_current_time()
-        self.logs_text.append(f"[{current_time}] [{level}] {message}")
+        self.append_log_entry(current_time, level, message)
 
         self.database_service.save_event(
             timestamp=current_time,
             level=level,
             message=message,
         )
+
+    def append_log_entry(self, timestamp: str, level: str, message: str) -> None:
+        if hasattr(self, "logs_text"):
+            self.logs_text.append(f"[{timestamp}] [{level}] {message}")
 
     def show_database_statistics(self) -> None:
         if not self.require_permission(
