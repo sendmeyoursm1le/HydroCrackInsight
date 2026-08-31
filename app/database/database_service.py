@@ -7,6 +7,8 @@ from app.database.records import (
     AuditRecord,
     DeviationRecord,
     EventRecord,
+    ProcessValueRecord,
+    ReportRecord,
     SensorDataRecord,
     ShiftHandoverRecord,
     ShiftJournalRecord,
@@ -275,6 +277,67 @@ class DatabaseService:
                 product_yield=float(row[7]),
                 mode=str(row[8]),
                 status=str(row[9]),
+            )
+
+    def get_recent_process_values(
+        self,
+        limit: int = 500,
+    ) -> tuple[ProcessValueRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    timestamp,
+                    temperature,
+                    pressure,
+                    feed_flow,
+                    hydrogen_flow,
+                    energy,
+                    water_consumption,
+                    catalyst_consumption,
+                    product_yield,
+                    mode,
+                    status
+                FROM (
+                    SELECT
+                        id,
+                        timestamp,
+                        temperature,
+                        pressure,
+                        feed_flow,
+                        hydrogen_flow,
+                        energy,
+                        water_consumption,
+                        catalyst_consumption,
+                        product_yield,
+                        mode,
+                        status
+                    FROM process_values
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                ORDER BY id
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                ProcessValueRecord(
+                    timestamp=str(row[0]),
+                    temperature=float(row[1]),
+                    pressure=float(row[2]),
+                    feed_flow=float(row[3]),
+                    hydrogen_flow=float(row[4]),
+                    energy=float(row[5]),
+                    water_consumption=float(row[6]),
+                    catalyst_consumption=float(row[7]),
+                    product_yield=float(row[8]),
+                    mode=str(row[9]),
+                    status=str(row[10]),
+                )
+                for row in cursor.fetchall()
             )
 
     def get_equipment_catalog(self) -> list[Equipment]:
@@ -970,6 +1033,81 @@ class DatabaseService:
                     action=str(row[3]),
                     details=str(row[4]),
                     level=str(row[5]),
+                )
+                for row in cursor.fetchall()
+            )
+
+    def save_report(
+        self,
+        report_type: str,
+        period_start: str,
+        period_end: str,
+        title: str,
+        file_path: str,
+        created_at: str,
+        created_by: str,
+        status: str = "created",
+    ) -> None:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO reports (
+                    report_type,
+                    period_start,
+                    period_end,
+                    title,
+                    file_path,
+                    created_at,
+                    created_by,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_type,
+                    period_start,
+                    period_end,
+                    title,
+                    file_path,
+                    created_at,
+                    created_by,
+                    status,
+                ),
+            )
+            connection.commit()
+
+    def get_recent_reports(self, limit: int = 50) -> tuple[ReportRecord, ...]:
+        with closing(self._connect()) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    report_type,
+                    period_start,
+                    period_end,
+                    title,
+                    COALESCE(file_path, ''),
+                    created_at,
+                    COALESCE(created_by, ''),
+                    status
+                FROM reports
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self._normalize_limit(limit),),
+            )
+
+            return tuple(
+                ReportRecord(
+                    report_type=str(row[0]),
+                    period_start=str(row[1]),
+                    period_end=str(row[2]),
+                    title=str(row[3]),
+                    file_path=str(row[4]),
+                    created_at=str(row[5]),
+                    created_by=str(row[6]),
+                    status=str(row[7]),
                 )
                 for row in cursor.fetchall()
             )

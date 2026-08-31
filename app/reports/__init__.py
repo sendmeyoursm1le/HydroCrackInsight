@@ -5,4 +5,10 @@ REPORT_TYPES = (
     "resources",
 )
 
-__all__ = ["REPORT_TYPES"]
+from app.reports.report_service import ReportGenerationResult, ReportService
+
+__all__ = [
+    "REPORT_TYPES",
+    "ReportGenerationResult",
+    "ReportService",
+]

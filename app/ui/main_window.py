@@ -34,6 +34,7 @@ from app.monitoring.parameter_snapshot import (
     build_parameter_snapshots,
 )
 from app.monitoring.process_data_importer import ProcessDataImporter
+from app.reports import ReportService
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CHANGE_OPERATING_MODE,
@@ -45,6 +46,7 @@ from app.users import (
     RESET_EQUIPMENT_STATUSES,
     SIMULATE_EMERGENCY,
     VIEW_DATABASE_STATISTICS,
+    VIEW_REPORTS,
     UserSession,
     get_accessible_tabs,
     has_permission,
@@ -79,6 +81,7 @@ class MainWindow(QMainWindow):
 
         self.database_service = database_service or DatabaseService()
         self.database_service.initialize_database()
+        self.report_service = ReportService(self.database_service)
         self.current_user = current_user or self.database_service.get_default_user_session()
         self.accessible_tabs = get_accessible_tabs(self.current_user.role_code)
         self.operating_modes = self.database_service.get_operating_modes()
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
         self.populate_trends_from_database()
         self.populate_resources_from_database()
         self.populate_forecast_table()
+        self.populate_reports_from_database()
         self.populate_shift_journal_from_database()
         self.populate_shift_handovers_from_database()
 
@@ -371,6 +375,30 @@ class MainWindow(QMainWindow):
                 self.forecast_table.setItem(row, col, item)
 
         self.forecast_table.resizeColumnsToContents()
+
+    def populate_reports_from_database(self) -> None:
+        if not hasattr(self, "reports_table"):
+            return
+
+        records = self.database_service.get_recent_reports()
+        self.reports_table.setRowCount(len(records))
+
+        for row, record in enumerate(records):
+            values = [
+                record.created_at,
+                record.report_type,
+                record.title,
+                record.period_start,
+                record.period_end,
+                record.created_by,
+                record.status,
+                record.file_path,
+            ]
+
+            for col, cell_value in enumerate(values):
+                self.reports_table.setItem(row, col, QTableWidgetItem(cell_value))
+
+        self.reports_table.resizeColumnsToContents()
 
     def create_monitoring_tab(self) -> QWidget:
         widget = QWidget()
@@ -772,29 +800,52 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
 
         description = QLabel(
-            "В этом разделе позже будет формирование суточных, недельных "
-            "и аварийных отчетов по работе установки."
+            "Формирование PDF и CSV отчетов по сохраненным данным установки."
         )
         description.setWordWrap(True)
 
         daily_report_button = QPushButton("Сформировать суточный отчет")
         resources_report_button = QPushButton("Сформировать отчет по ресурсам")
         emergency_report_button = QPushButton("Сформировать отчет по авариям")
+        shift_report_button = QPushButton("Сформировать сменный отчет")
         database_stats_button = QPushButton("Показать статистику БД")
 
+        daily_report_button.clicked.connect(self.generate_daily_report)
+        resources_report_button.clicked.connect(self.generate_resources_report)
+        emergency_report_button.clicked.connect(self.generate_emergency_report)
+        shift_report_button.clicked.connect(self.generate_shift_report)
         database_stats_button.clicked.connect(self.show_database_statistics)
         self.configure_button_permission(
             database_stats_button,
             VIEW_DATABASE_STATISTICS,
         )
 
+        self.reports_table = QTableWidget()
+        self.reports_table.setColumnCount(8)
+        self.reports_table.setHorizontalHeaderLabels(
+            [
+                "Создан",
+                "Тип",
+                "Название",
+                "Период с",
+                "Период по",
+                "Автор",
+                "Статус",
+                "Файл",
+            ]
+        )
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addWidget(daily_report_button)
+        buttons_layout.addWidget(resources_report_button)
+        buttons_layout.addWidget(emergency_report_button)
+        buttons_layout.addWidget(shift_report_button)
+        buttons_layout.addWidget(database_stats_button)
+
         layout.addWidget(title)
         layout.addWidget(description)
-        layout.addWidget(daily_report_button)
-        layout.addWidget(resources_report_button)
-        layout.addWidget(emergency_report_button)
-        layout.addWidget(database_stats_button)
-        layout.addStretch()
+        layout.addLayout(buttons_layout)
+        layout.addWidget(self.reports_table)
 
         widget.setLayout(layout)
         return widget
@@ -1285,6 +1336,54 @@ class MainWindow(QMainWindow):
         self.audit_action(
             action="forecast_scenarios_calculated",
             details="Расчет сценариев прогнозирования и оптимизации",
+        )
+
+    def generate_daily_report(self) -> None:
+        self.generate_report("daily")
+
+    def generate_resources_report(self) -> None:
+        self.generate_report("resources")
+
+    def generate_emergency_report(self) -> None:
+        self.generate_report("emergency")
+
+    def generate_shift_report(self) -> None:
+        self.generate_report("shift")
+
+    def generate_report(self, report_type: str) -> None:
+        if not self.require_permission(VIEW_REPORTS, "формирование отчетов"):
+            return
+
+        generators = {
+            "daily": self.report_service.generate_daily_report,
+            "resources": self.report_service.generate_resources_report,
+            "emergency": self.report_service.generate_emergency_report,
+            "shift": self.report_service.generate_shift_report,
+        }
+
+        generator = generators[report_type]
+        try:
+            result = generator(self.current_user.username)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка отчета", str(exc))
+            self.add_log("WARNING", f"Ошибка формирования отчета: {exc}")
+            self.audit_action(
+                action="report_generation_failed",
+                details=f"{report_type}: {exc}",
+                level="WARNING",
+            )
+            return
+
+        self.populate_reports_from_database()
+        self.add_log("INFO", f"Сформирован отчет: {result.title}")
+        self.audit_action(
+            action="report_generated",
+            details=f"{result.title}: {result.pdf_path}",
+        )
+        QMessageBox.information(
+            self,
+            "Отчет создан",
+            f"PDF: {result.pdf_path}\nCSV: {result.csv_path}",
         )
 
     def add_shift_journal_entry(self) -> None:

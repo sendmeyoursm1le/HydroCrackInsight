@@ -18,6 +18,7 @@ from app.monitoring.parameter_snapshot import (
     classify_parameter_status,
 )
 from app.monitoring.process_data_importer import ProcessDataImporter
+from app.reports import ReportService
 from app.simulation.sensor_simulator import SensorSimulator
 from app.users import (
     CHANGE_OPERATING_MODE,
@@ -553,6 +554,28 @@ class DatabaseServiceTest(unittest.TestCase):
             self.assertEqual(counts["audit_log"], 1)
             self.assertEqual(database.get_recent_audit_events()[0].action, "login")
 
+    def test_database_saves_report_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+
+            database.save_report(
+                report_type="daily",
+                period_start="01.01.2026 00:00:00",
+                period_end="01.01.2026 23:59:59",
+                title="Суточный отчет",
+                file_path=str(Path(temp_dir) / "daily.pdf"),
+                created_at="01.01.2026 23:59:59",
+                created_by="operator",
+            )
+
+            reports = database.get_recent_reports()
+
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0].report_type, "daily")
+            self.assertEqual(reports[0].created_by, "operator")
+
     def test_role_permissions_limit_actions_and_tabs(self) -> None:
         self.assertTrue(has_permission("operator", SIMULATE_EMERGENCY))
         self.assertFalse(has_permission("manager", SIMULATE_EMERGENCY))
@@ -596,6 +619,53 @@ class ProjectStructureTest(unittest.TestCase):
         self.assertIn("operator", role_codes)
         self.assertIn("technologist", role_codes)
         self.assertIn("instrumentation_engineer", role_codes)
+
+
+class ReportServiceTest(unittest.TestCase):
+    def test_report_service_generates_pdf_csv_and_database_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "hydrocrack.db"
+            output_dir = Path(temp_dir) / "generated"
+            database = DatabaseService(str(database_path))
+            database.initialize_database()
+            database.save_process_state("01.01.2026 00:00:00", ProcessState())
+            database.save_process_state(
+                "01.01.2026 01:00:00",
+                ProcessState(temperature=452.0, status="авария"),
+            )
+            database.save_event("01.01.2026 01:00:01", "CRITICAL", "Аварийная остановка")
+            database.save_deviation(
+                timestamp="01.01.2026 01:00:01",
+                parameter="Температура",
+                value="452.0 °C",
+                level="Авария",
+                message="Критическое превышение температуры",
+                recommendation="Снизить подачу сырья",
+            )
+            database.save_shift_journal_entry(
+                timestamp="01.01.2026 07:50:00",
+                shift_code="Смена A",
+                author_username="operator",
+                level="ACTION",
+                message="Контроль после аварийной остановки",
+                action_required=True,
+            )
+
+            service = ReportService(database, output_dir=output_dir)
+            results = (
+                service.generate_daily_report("operator"),
+                service.generate_resources_report("operator"),
+                service.generate_emergency_report("operator"),
+                service.generate_shift_report("operator"),
+            )
+
+            for result in results:
+                self.assertTrue(result.pdf_path.exists())
+                self.assertTrue(result.csv_path.exists())
+                self.assertGreater(result.pdf_path.stat().st_size, 0)
+                self.assertGreater(result.csv_path.stat().st_size, 0)
+
+            self.assertEqual(len(database.get_recent_reports()), 4)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,21 @@ class SensorDataRecord:
 
 
 @dataclass(frozen=True)
+class ProcessValueRecord:
+    timestamp: str
+    temperature: float
+    pressure: float
+    feed_flow: float
+    hydrogen_flow: float
+    energy: float
+    water_consumption: float
+    catalyst_consumption: float
+    product_yield: float
+    mode: str
+    status: str
+
+
+@dataclass(frozen=True)
 class ShiftJournalRecord:
     timestamp: str
     shift_code: str
@@ -61,3 +76,15 @@ class ShiftHandoverRecord:
     open_actions: str
     checked_items: int
     total_items: int
+
+
+@dataclass(frozen=True)
+class ReportRecord:
+    report_type: str
+    period_start: str
+    period_end: str
+    title: str
+    file_path: str
+    created_at: str
+    created_by: str
+    status: str
