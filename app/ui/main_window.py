@@ -542,7 +542,7 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("Остановить мониторинг")
         self.emergency_button = QPushButton("Сымитировать аварию")
         self.reset_button = QPushButton("Сбросить аварию")
-        self.import_button = QPushButton("Импорт CSV/Excel")
+        self.import_button = QPushButton("Загрузить данные")
 
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
